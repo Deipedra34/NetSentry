@@ -126,9 +126,19 @@ Requires **Python 3.10+**.
 git clone <this-repo-url>
 cd netsentry
 python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+source .venv/bin/activate        # Windows (PowerShell): .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
+
+> **Windows PowerShell users:** if `Activate.ps1` fails with
+> `running scripts is disabled on this system`, that's PowerShell's execution
+> policy blocking it. Fix it for just the current window with:
+> ```powershell
+> Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+> .venv\Scripts\Activate.ps1
+> ```
+> `-Scope Process` only affects that terminal session — nothing system-wide
+> changes, and it resets once you close the window.
 
 Live packet capture additionally requires:
 
@@ -167,8 +177,9 @@ python main.py -i "Ethernet"
 sudo python main.py -i eth0 --web
 ```
 
-Then open the dashboard in a browser. The table refreshes automatically
-(interval configurable via `web.refresh_interval` in `config.yaml`).
+Then open the dashboard in a browser at the `host`/`port` configured under
+`web` in `config.yaml` (defaults to `https://127.0.0.1:5000`). The table
+refreshes automatically (interval configurable via `web.refresh_interval`).
 
 #### Dashboard access
 
@@ -181,6 +192,12 @@ web:
   username: admin
   password: "..."
 ```
+
+Since the HTTPS certificate is self-signed (auto-generated on first run),
+your browser will show a "connection is not private" / "not secure" warning
+the first time you visit — this is expected. Click through it (e.g.
+"Advanced" → "Proceed to 127.0.0.1") to reach the login prompt, then sign in
+with the `username`/`password` from `config.yaml`.
 
 To change the username or password, edit those two values in `config.yaml`
 and restart the dashboard — no code changes needed. Auth is disabled if
