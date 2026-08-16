@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NetSentry</title>
+<style>
+  :root {
+    --bg: #0f1420;
+    --panel: #161d2e;
+    --border: #263149;
+    --text: #e6eaf2;
+    --muted: #8a96ad;
+    --accent: #4fd1c5;
+    --danger: #ef5b5b;
+    --warn: #f0a93c;
+    --info: #5b8def;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    padding: 1.25rem 2rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 {
+    font-size: 1.35rem;
+    margin: 0;
+    letter-spacing: 0.02em;
+  }
+  header h1 span { color: var(--accent); }
+  .status {
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .status .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    margin-right: 6px;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; }
+  }
+  main { padding: 1.5rem 2rem 3rem; max-width: 1200px; margin: 0 auto; }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+  }
+  .card .label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+  }
+  .card .value {
+    font-size: 1.6rem;
+    font-weight: 600;
+    margin-top: 0.25rem;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  thead th {
+    text-align: left;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  tbody td {
+    padding: 0.65rem 1rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.9rem;
+    vertical-align: top;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: rgba(255,255,255,0.02); }
+  .badge {
+    display: inline-block;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .badge.PORT_SCAN { background: rgba(91,141,239,0.15); color: var(--info); }
+  .badge.ARP_SPOOF { background: rgba(240,169,60,0.15); color: var(--warn); }
+  .badge.SYN_FLOOD { background: rgba(239,91,91,0.15); color: var(--danger); }
+  .badge.TRAFFIC_ANOMALY { background: rgba(79,209,197,0.15); color: var(--accent); }
+  .empty { color: var(--muted); padding: 2rem; text-align: center; }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.75rem;
+    padding: 2rem 0 1rem;
+  }
+  code { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Net<span>Sentry</span></h1>
+  <div class="status"><span class="dot"></span><span id="last-updated">connecting&hellip;</span></div>
+</header>
+<main>
+  <section class="stats" id="stats">
+    <div class="card"><div class="label">Total Events</div><div class="value" id="stat-total">&mdash;</div></div>
+    <div class="card"><div class="label">Port Scans</div><div class="value" id="stat-PORT_SCAN">&mdash;</div></div>
+    <div class="card"><div class="label">ARP Spoofing</div><div class="value" id="stat-ARP_SPOOF">&mdash;</div></div>
+    <div class="card"><div class="label">SYN Floods</div><div class="value" id="stat-SYN_FLOOD">&mdash;</div></div>
+    <div class="card"><div class="label">Traffic Anomalies</div><div class="value" id="stat-TRAFFIC_ANOMALY">&mdash;</div></div>
+  </section>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 12rem;">Timestamp</th>
+        <th style="width: 10rem;">Source IP</th>
+        <th style="width: 10rem;">Event Type</th>
+        <th>Details</th>
+      </tr>
+    </thead>
+    <tbody id="events-body">
+      <tr><td colspan="4" class="empty">Waiting for events&hellip;</td></tr>
+    </tbody>
+  </table>
+</main>
+<footer>
+  NetSentry auto-refreshes every <code>{{ refresh_interval }}</code>s &middot; API: <code>/api/events</code>, <code>/api/stats</code>
+  <br>by Deipedra
+</footer>
+
+<script>
+const REFRESH_MS = {{ refresh_interval }} * 1000;
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str ?? "";
+  return div.innerHTML;
+}
+
+async function refreshEvents() {
+  try {
+    const [eventsRes, statsRes] = await Promise.all([
+      fetch("/api/events?limit=100"),
+      fetch("/api/stats"),
+    ]);
+    const events = await eventsRes.json();
+    const stats = await statsRes.json();
+
+    document.getElementById("stat-total").textContent = stats.total_events ?? 0;
+    for (const type of ["PORT_SCAN", "ARP_SPOOF", "SYN_FLOOD", "TRAFFIC_ANOMALY"]) {
+      const el = document.getElementById(`stat-${type}`);
+      if (el) el.textContent = (stats.by_type && stats.by_type[type]) || 0;
+    }
+
+    const body = document.getElementById("events-body");
+    if (!events.length) {
+      body.innerHTML = '<tr><td colspan="4" class="empty">No events detected yet.</td></tr>';
+    } else {
+      body.innerHTML = events.map(ev => `
+        <tr>
+          <td>${escapeHtml(ev.timestamp)}</td>
+          <td>${escapeHtml(ev.source_ip)}</td>
+          <td><span class="badge ${escapeHtml(ev.event_type)}">${escapeHtml(ev.event_type)}</span></td>
+          <td>${escapeHtml(ev.details)}</td>
+        </tr>
+      `).join("");
+    }
+
+    document.getElementById("last-updated").textContent =
+      "updated " + new Date().toLocaleTimeString();
+  } catch (err) {
+    document.getElementById("last-updated").textContent = "connection error";
+    console.error("NetSentry dashboard refresh failed:", err);
+  }
+}
+
+refreshEvents();
+setInterval(refreshEvents, REFRESH_MS);
+</script>
+</body>
+</html>

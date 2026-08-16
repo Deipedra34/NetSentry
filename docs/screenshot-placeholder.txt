@@ -1,0 +1,10 @@
+Add a real dashboard screenshot here as docs/screenshot.png, then update
+README.md's "Dashboard preview" section to embed it:
+
+    ![NetSentry dashboard](docs/screenshot.png)
+
+To generate one:
+  1. python main.py --web-only   (or run capture with --web)
+  2. Trigger a few sample events (see tests/conftest.py's make_packet for
+     ideas, or just run the app against live/mock traffic)
+  3. Open http://127.0.0.1:5000 and take a screenshot

@@ -1,0 +1,53 @@
+##############################################################################
+# NetSentry configuration
+#
+# Tune detection thresholds and runtime behaviour here. All values have
+# sane defaults baked into src/config.py, so this file only needs to
+# contain the keys you want to override.
+##############################################################################
+
+# Port scan detection: a single source IP contacting many distinct
+# destination ports within a short time window.
+port_scan:
+  enabled: true
+  port_threshold: 15 # distinct ports within the time window to trigger an alert
+  time_window: 10 # seconds
+  cooldown: 30 # seconds to wait before re-alerting on the same source IP
+
+# ARP spoofing detection: a single IP address observed bound to more than
+# one MAC address (classic ARP cache poisoning indicator).
+arp_spoof:
+  enabled: true
+  cooldown: 60 # seconds to wait before re-alerting on the same IP/MAC pair
+
+# SYN flood / basic DoS detection: abnormally high rate of TCP SYN packets
+# originating from a single source IP.
+dos:
+  enabled: true
+  syn_threshold: 100 # SYN packets within the time window to trigger an alert
+  time_window: 5 # seconds
+  cooldown: 30 # seconds to wait before re-alerting on the same source IP
+
+# General statistical traffic anomaly detection: total traffic volume in a
+# rolling window exceeding X times the rolling baseline average.
+traffic_anomaly:
+  enabled: true
+  window_seconds: 10 # size of the measurement window
+  baseline_windows: 6 # number of prior windows averaged to form the baseline
+  multiplier: 3.0 # trigger when current window > multiplier * baseline average
+  min_baseline_samples: 3 # minimum completed windows before alerting
+
+database:
+  path: netsentry.db
+
+logging:
+  level: INFO
+  file: netsentry.log
+
+web:
+  host: 127.0.0.1
+  port: 5000
+  refresh_interval: 5 # seconds, dashboard auto-refresh interval
+  https: true # serve over TLS using a self-signed cert (auto-generated on first run)
+  username: admin
+  password: "5DX8i*=Sx=6v#2KT" # protects the dashboard with HTTP Basic Auth
