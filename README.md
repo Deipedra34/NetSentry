@@ -90,8 +90,11 @@ Design notes:
 ```
 netsentry/
 ├── main.py                     # CLI entry point (argparse)
+├── desktop_app.py               # Desktop launcher (native window via pywebview)
+├── Start NetSentry.bat          # Windows double-click launcher (no terminal needed)
 ├── config.yaml                 # Threshold / runtime configuration
 ├── requirements.txt
+├── requirements-desktop.txt     # Extra dep (pywebview) for desktop_app.py
 ├── src/
 │   ├── config.py                # Typed config dataclasses + YAML loader
 │   ├── packet_info.py            # Protocol-agnostic packet representation
@@ -154,6 +157,48 @@ dashboard against an existing database — only to capture live traffic.
 ---
 
 ## Usage
+
+### Desktop app (simplest option)
+
+If you don't want to deal with flags, config edits, or a browser tab, run
+NetSentry as a native desktop window instead.
+
+**Windows, no terminal at all:** once you've done the one-time
+`python -m venv .venv` + `pip install` setup from the
+[Installation](#installation) section, just double-click
+[`Start NetSentry.bat`](Start%20NetSentry.bat) in the project folder. It
+installs the desktop-only dependency the first time it's needed, then
+launches the app window in the background with no console window left open.
+Right-click it → *Send to* → *Desktop (create shortcut)* if you want it to
+behave like a normal app icon.
+
+**From a terminal (any OS):**
+
+```bash
+pip install -r requirements-desktop.txt
+python desktop_app.py
+```
+
+This starts capture (default interface, all enabled detectors) and the
+dashboard together, then opens them in a real app window (via
+[pywebview](https://pywebview.flowrl.com/)) instead of a browser tab — no
+URL, no self-signed cert warning, no login prompt. Close the window to stop
+everything. Same admin/root requirement as below applies for live capture.
+
+```bash
+python desktop_app.py -i "Ethernet"   # capture on a specific interface
+python desktop_app.py --web-only       # just browse the existing db, no capture
+```
+
+> **Note:** the window is rendered with Microsoft Edge WebView2 (bundled
+> with Windows 10/11) on Windows, or the system's native webview on
+> Linux/macOS. If the window fails to open, make sure the
+> [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+> is installed (it usually already is).
+
+Everything below this section describes the CLI (`main.py`), which is still
+the way to go for scripting, servers, or exposing the dashboard to other
+machines on the network.
 
 ### List available interfaces
 
