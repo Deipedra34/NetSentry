@@ -1,3 +1,5 @@
+![NetSentry](docs/netsentry_banner.svg)
+
 # NetSentry
 
 **NetSentry** is a lightweight, Python-based Network Intrusion Detection
