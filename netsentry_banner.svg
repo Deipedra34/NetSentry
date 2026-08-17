@@ -1,0 +1,51 @@
+<svg width="1200" height="300" viewBox="0 0 1200 300" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1d2b34" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0b1215" stop-opacity="1"/>
+      <stop offset="70%" stop-color="#0b1215" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#0b1215" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="300" fill="#0b1215"/>
+  <rect width="1200" height="300" fill="url(#grid)"/>
+
+  <circle cx="980" cy="150" r="3" fill="#2dd4bf"/>
+  <circle cx="1040" cy="90" r="2" fill="#2dd4bf" opacity="0.6"/>
+  <circle cx="1100" cy="200" r="2.5" fill="#2dd4bf" opacity="0.5"/>
+  <circle cx="900" cy="60" r="2" fill="#2dd4bf" opacity="0.4"/>
+  <circle cx="1140" cy="120" r="2" fill="#2dd4bf" opacity="0.7"/>
+  <line x1="980" y1="150" x2="1040" y2="90" stroke="#2dd4bf" stroke-width="0.8" opacity="0.3"/>
+  <line x1="980" y1="150" x2="1100" y2="200" stroke="#2dd4bf" stroke-width="0.8" opacity="0.3"/>
+  <line x1="1040" y1="90" x2="1140" y2="120" stroke="#2dd4bf" stroke-width="0.8" opacity="0.3"/>
+  <line x1="900" y1="60" x2="980" y2="150" stroke="#2dd4bf" stroke-width="0.8" opacity="0.2"/>
+
+  <g transform="translate(100,150)">
+    <circle r="34" fill="none" stroke="#2dd4bf" stroke-width="2"/>
+    <circle r="34" fill="none" stroke="#2dd4bf" stroke-width="2" opacity="0.35" transform="scale(1.35)"/>
+    <path d="M0 -18 L15 -9 L15 6 C15 16 8 22 0 26 C-8 22 -15 16 -15 6 L-15 -9 Z" fill="#2dd4bf"/>
+    <path d="M-6 2 L-2 7 L7 -6" stroke="#0b1215" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <text x="175" y="140" font-family="Arial, sans-serif" font-size="52" font-weight="700" fill="#f5f7f8">Net<tspan fill="#2dd4bf">Sentry</tspan></text>
+  <text x="177" y="175" font-family="Arial, sans-serif" font-size="17" fill="#8a9aa0" letter-spacing="0.5">Real-time network intrusion detection, built with Python and Scapy</text>
+
+  <g font-family="Arial, sans-serif" font-size="13" fill="#5b6b71">
+    <rect x="177" y="200" width="120" height="26" rx="4" fill="none" stroke="#233238" stroke-width="1"/>
+    <text x="237" y="217" text-anchor="middle" fill="#8a9aa0">Port scans</text>
+
+    <rect x="309" y="200" width="130" height="26" rx="4" fill="none" stroke="#233238" stroke-width="1"/>
+    <text x="374" y="217" text-anchor="middle" fill="#8a9aa0">ARP spoofing</text>
+
+    <rect x="451" y="200" width="120" height="26" rx="4" fill="none" stroke="#233238" stroke-width="1"/>
+    <text x="511" y="217" text-anchor="middle" fill="#8a9aa0">SYN floods</text>
+
+    <rect x="583" y="200" width="150" height="26" rx="4" fill="none" stroke="#233238" stroke-width="1"/>
+    <text x="658" y="217" text-anchor="middle" fill="#8a9aa0">Traffic anomalies</text>
+  </g>
+
+  <text x="177" y="258" font-family="Arial, sans-serif" font-size="13" fill="#3f4d52">by Deipedra</text>
+</svg>
