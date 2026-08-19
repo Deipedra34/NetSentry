@@ -37,6 +37,13 @@ traffic_anomaly:
   multiplier: 3.0 # trigger when current window > multiplier * baseline average
   min_baseline_samples: 3 # minimum completed windows before alerting
 
+# IP whitelist: packets whose source IP matches an entry here skip detection
+# entirely. Entries can be exact IPs or CIDR ranges.
+# whitelist:
+#   - "192.168.1.1"
+#   - "10.0.0.0/24"
+whitelist: []
+
 database:
   path: netsentry.db
 

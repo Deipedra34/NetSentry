@@ -11,7 +11,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import yaml
 
@@ -96,6 +96,8 @@ class Config:
     arp_spoof: ArpSpoofConfig = field(default_factory=ArpSpoofConfig)
     dos: DosConfig = field(default_factory=DosConfig)
     traffic_anomaly: TrafficAnomalyConfig = field(default_factory=TrafficAnomalyConfig)
+    # source IPs/CIDR ranges that skip detection entirely, see src/engine.py
+    whitelist: List[str] = field(default_factory=list)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     web: WebConfig = field(default_factory=WebConfig)

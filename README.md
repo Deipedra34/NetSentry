@@ -341,6 +341,24 @@ web:
 
 ---
 
+## Whitelisting
+
+Packets from trusted source IPs can be excluded from detection entirely by
+listing them under `whitelist` in `config.yaml`. Entries can be exact IPs or
+CIDR ranges:
+
+```yaml
+whitelist:
+  - "192.168.1.1"
+  - "10.0.0.0/24"
+```
+
+Any packet whose source IP matches an entry (exact match or falls inside a
+CIDR range) skips every detector — nothing is logged or alerted on for it.
+A debug-level log line is emitted each time a packet is skipped this way.
+
+---
+
 ## Testing
 
 The full test suite runs entirely offline against synthetic packet data —

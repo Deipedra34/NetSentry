@@ -7,8 +7,9 @@ whatever events come out get saved to the db and logged. Nothing fancy.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
-from typing import Dict, List
+from typing import Dict, List, Union
 
 from src.config import Config
 from src.database import Database
@@ -77,14 +78,22 @@ def build_detectors(config: Config, enabled: List[str] | None = None) -> List[De
     return detectors
 
 
+def _parse_whitelist(entries: List[str]) -> List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
+    """Turns whitelist strings (exact IPs or CIDR ranges) into ip_network objects
+    we can do fast `in` checks against. strict=False so a bare IP like
+    "10.0.0.5" doesn't blow up for not being a proper network address."""
+    return [ipaddress.ip_network(entry, strict=False) for entry in entries]
+
+
 class DetectionEngine:
     """Runs every packet past the active detectors, one at a time."""
 
-    def __init__(self, database: Database, detectors: List[Detector]) -> None:
+    def __init__(self, database: Database, detectors: List[Detector], whitelist: List[str] | None = None) -> None:
         # detectors should already be built/configured by build_detectors() before
         # they get here, this class doesn't do any of that itself
         self.database = database
         self.detectors = detectors
+        self._whitelist_networks = _parse_whitelist(whitelist or [])
         self._packet_count = 0
         self._event_count = 0
 
@@ -98,10 +107,24 @@ class DetectionEngine:
         """how many events have fired total"""
         return self._event_count
 
+    def _is_whitelisted(self, src_ip: str | None) -> bool:
+        """True if src_ip matches an exact IP or falls inside a CIDR range
+        from the whitelist."""
+        if src_ip is None or not self._whitelist_networks:
+            return False
+        try:
+            addr = ipaddress.ip_address(src_ip)
+        except ValueError:
+            return False
+        return any(addr in network for network in self._whitelist_networks)
+
     def handle_packet(self, packet: PacketInfo) -> None:
         """This is the callback the sniffer calls per packet. Runs it through
         every detector and logs whatever comes back."""
         self._packet_count += 1
+        if self._is_whitelisted(packet.src_ip):
+            logger.debug("Skipping detection for whitelisted source IP %s", packet.src_ip)
+            return
         for detector in self.detectors:
             try:
                 events = detector.process_packet(packet)

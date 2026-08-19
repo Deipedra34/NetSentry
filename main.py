@@ -188,7 +188,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     logger.info("Active detectors: %s", ", ".join(d.name for d in detectors))
-    engine = DetectionEngine(database, detectors)
+    engine = DetectionEngine(database, detectors, whitelist=config.whitelist)
 
     if args.web:
         run_web_dashboard(database, config, blocking=False)

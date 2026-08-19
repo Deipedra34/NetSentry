@@ -60,3 +60,39 @@ def test_engine_survives_detector_exception(in_memory_db: Database) -> None:
     engine.handle_packet(make_packet(timestamp=1.0))
     assert engine.packet_count == 1
     assert engine.event_count == 0
+
+
+def test_whitelist_exact_ip_skips_detection(in_memory_db: Database) -> None:
+    config = Config()
+    config.port_scan.port_threshold = 1
+    detectors = build_detectors(config, enabled=["port_scan"])
+    engine = DetectionEngine(in_memory_db, detectors, whitelist=["10.0.0.1"])
+
+    engine.handle_packet(make_packet(timestamp=1.0, src_ip="10.0.0.1", dst_port=1))
+
+    assert engine.packet_count == 1
+    assert engine.event_count == 0
+
+
+def test_whitelist_cidr_range_skips_detection(in_memory_db: Database) -> None:
+    config = Config()
+    config.port_scan.port_threshold = 1
+    detectors = build_detectors(config, enabled=["port_scan"])
+    engine = DetectionEngine(in_memory_db, detectors, whitelist=["10.0.0.0/24"])
+
+    engine.handle_packet(make_packet(timestamp=1.0, src_ip="10.0.0.42", dst_port=1))
+
+    assert engine.packet_count == 1
+    assert engine.event_count == 0
+
+
+def test_whitelist_non_matching_ip_still_processed(in_memory_db: Database) -> None:
+    config = Config()
+    config.port_scan.port_threshold = 1
+    detectors = build_detectors(config, enabled=["port_scan"])
+    engine = DetectionEngine(in_memory_db, detectors, whitelist=["192.168.1.1", "10.0.0.0/24"])
+
+    engine.handle_packet(make_packet(timestamp=1.0, src_ip="203.0.113.5", dst_port=1))
+
+    assert engine.packet_count == 1
+    assert engine.event_count == 1
