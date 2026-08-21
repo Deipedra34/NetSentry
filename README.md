@@ -408,4 +408,4 @@ one alert per cooldown period rather than one per packet.
 
 ---
 
-Made by **Deipedra**
+<p align="center"><i>-by Deipedra</i></p>
