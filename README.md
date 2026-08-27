@@ -105,6 +105,7 @@ netsentry/
 │   ├── database.py               # SQLite event storage
 │   ├── logging_config.py         # Console + rotating file logging
 │   ├── detectors.py              # Detector interface + all four detectors
+│   ├── notifications.py          # Discord / Telegram / email alert dispatch
 │   ├── web.py                    # Flask app, JSON API, self-signed TLS setup
 │   └── templates/
 │       └── dashboard.html
@@ -118,6 +119,7 @@ netsentry/
     ├── test_config.py
     ├── test_sniffer.py
     ├── test_engine.py
+    ├── test_notifications.py
     └── test_web_app.py
 ```
 
@@ -356,6 +358,61 @@ whitelist:
 Any packet whose source IP matches an entry (exact match or falls inside a
 CIDR range) skips every detector — nothing is logged or alerted on for it.
 A debug-level log line is emitted each time a packet is skipped this way.
+
+---
+
+## Notifications
+
+NetSentry can push critical alerts (SYN flood, ARP spoofing, traffic
+anomalies, and port scans) out to Discord, Telegram, and/or email as they
+happen, in addition to logging them and writing them to the dashboard. All
+three channels are independently configurable under `notifications` in
+`config.yaml` and default to disabled — see the commented examples already
+in the shipped `config.yaml`. Each channel fails independently (a bad
+webhook, wrong token, or unreachable SMTP server just logs a warning) and is
+throttled by `notifications.cooldown` (seconds) per source IP + event type
+so a sustained attack doesn't spam you once per packet.
+
+**Discord** — create a webhook from the target channel's *Settings →
+Integrations → Webhooks*, copy its URL into `notifications.discord.webhook_url`,
+and set `notifications.discord.enabled: true`. Alerts arrive as a formatted
+embed with the event type, source IP, timestamp, and details.
+
+**Telegram** — message [@BotFather](https://t.me/BotFather) to create a bot
+and get a bot token, then message your new bot (or add it to a group) and
+grab the chat ID (e.g. via the `getUpdates` API endpoint). Fill in
+`notifications.telegram.bot_token` and `notifications.telegram.chat_id`, and
+set `enabled: true`.
+
+**Email** — fill in `notifications.email.smtp_host`/`smtp_port` plus
+`username`/`password` for an SMTP account (for Gmail, this typically means
+an [app password](https://myaccount.google.com/apppasswords) rather than
+your normal login), and `from_addr`/`to_addr`, then set `enabled: true`.
+Alerts are sent as plain-text email with the event type in the subject line.
+
+```yaml
+notifications:
+  cooldown: 300
+
+  discord:
+    enabled: true
+    webhook_url: "https://discord.com/api/webhooks/XXXX/XXXX"
+
+  telegram:
+    enabled: true
+    bot_token: "123456789:AAExampleTokenFromBotFather"
+    chat_id: "123456789"
+
+  email:
+    enabled: true
+    smtp_host: "smtp.gmail.com"
+    smtp_port: 587
+    username: "alerts@example.com"
+    password: "app-password-here"
+    from_addr: "alerts@example.com"
+    to_addr: "you@example.com"
+    use_tls: true
+```
 
 ---
 

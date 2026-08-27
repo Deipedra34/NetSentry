@@ -44,6 +44,33 @@ traffic_anomaly:
 #   - "10.0.0.0/24"
 whitelist: []
 
+# Multi-channel alerting for critical events (SYN flood, ARP spoofing,
+# traffic anomalies, port scans). Each channel is independently toggleable
+# and defaults to disabled -- see README.md "Notifications" for setup steps.
+notifications:
+  # seconds to wait before re-alerting the same source IP + event type on a
+  # given channel, so a sustained attack doesn't spam every packet
+  cooldown: 300
+
+  discord:
+    enabled: false
+    # webhook_url: "https://discord.com/api/webhooks/XXXXXXXX/XXXXXXXX"
+
+  telegram:
+    enabled: false
+    # bot_token: "123456789:AAExampleTokenFromBotFather"
+    # chat_id: "123456789"
+
+  email:
+    enabled: false
+    # smtp_host: "smtp.gmail.com"
+    # smtp_port: 587
+    # username: "alerts@example.com"
+    # password: "app-password-here"
+    # from_addr: "alerts@example.com"
+    # to_addr: "you@example.com"
+    # use_tls: true
+
 database:
   path: netsentry.db
 

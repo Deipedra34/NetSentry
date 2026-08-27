@@ -14,6 +14,7 @@ from typing import Dict, List, Union
 from src.config import Config
 from src.database import Database
 from src.detectors import ArpSpoofDetector, Detector, DosDetector, PortScanDetector, TrafficAnomalyDetector
+from src.notifications import NotificationDispatcher
 from src.packet_info import PacketInfo
 
 logger = logging.getLogger("netsentry.engine")
@@ -88,12 +89,19 @@ def _parse_whitelist(entries: List[str]) -> List[Union[ipaddress.IPv4Network, ip
 class DetectionEngine:
     """Runs every packet past the active detectors, one at a time."""
 
-    def __init__(self, database: Database, detectors: List[Detector], whitelist: List[str] | None = None) -> None:
+    def __init__(
+        self,
+        database: Database,
+        detectors: List[Detector],
+        whitelist: List[str] | None = None,
+        notifier: NotificationDispatcher | None = None,
+    ) -> None:
         # detectors should already be built/configured by build_detectors() before
         # they get here, this class doesn't do any of that itself
         self.database = database
         self.detectors = detectors
         self._whitelist_networks = _parse_whitelist(whitelist or [])
+        self.notifier = notifier
         self._packet_count = 0
         self._event_count = 0
 
@@ -140,3 +148,8 @@ class DetectionEngine:
                     event.source_ip,
                     event.details,
                 )
+                if self.notifier is not None:
+                    try:
+                        self.notifier.notify(event)
+                    except Exception:  # noqa: BLE001 - notification failures must not affect capture
+                        logger.exception("NotificationDispatcher raised an exception")

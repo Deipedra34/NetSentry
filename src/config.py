@@ -71,6 +71,51 @@ class LoggingConfig:
 
 
 @dataclass
+class DiscordConfig:
+    """Discord webhook settings for critical event alerts."""
+
+    enabled: bool = False
+    webhook_url: str = ""
+
+
+@dataclass
+class TelegramConfig:
+    """Telegram Bot API settings for critical event alerts."""
+
+    enabled: bool = False
+    bot_token: str = ""
+    chat_id: str = ""
+
+
+@dataclass
+class EmailConfig:
+    """SMTP settings for critical event alerts."""
+
+    enabled: bool = False
+    smtp_host: str = ""
+    smtp_port: int = 587
+    username: str = ""
+    password: str = ""
+    from_addr: str = ""
+    to_addr: str = ""
+    use_tls: bool = True
+
+
+@dataclass
+class NotificationsConfig:
+    """Multi-channel alerting for critical events. Each channel defaults to
+    disabled -- opting in means setting enabled: true plus that channel's
+    fields in config.yaml."""
+
+    # seconds to wait before re-alerting the same source IP + event type on
+    # a given channel, so a sustained attack doesn't spam every packet
+    cooldown: float = 300.0
+    discord: DiscordConfig = field(default_factory=DiscordConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    email: EmailConfig = field(default_factory=EmailConfig)
+
+
+@dataclass
 class WebConfig:
     """Flask dashboard settings."""
 
@@ -101,6 +146,7 @@ class Config:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
 
 
 def _merge_dataclass(instance: Any, overrides: Dict[str, Any]) -> Any:
