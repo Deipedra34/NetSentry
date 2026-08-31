@@ -29,7 +29,7 @@ def parse_packet(packet: object) -> Optional[PacketInfo]:
         return None
 
     timestamp = float(getattr(packet, "time", time.time()))
-    info = PacketInfo(timestamp=timestamp, length=len(packet))
+    info = PacketInfo(timestamp=timestamp, length=len(packet), raw_packet=packet)
 
     if Ether in packet:
         info.src_mac = packet[Ether].src

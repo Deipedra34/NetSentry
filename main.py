@@ -31,6 +31,7 @@ from src.database import Database
 from src.engine import DETECTOR_NAMES, DetectionEngine, build_detectors
 from src.logging_config import setup_logging
 from src.notifications import NotificationDispatcher
+from src.pcap_export import PcapExporter
 from src.sniffer import NetworkSniffer, list_interfaces
 
 logger = logging.getLogger("netsentry.main")
@@ -190,7 +191,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     logger.info("Active detectors: %s", ", ".join(d.name for d in detectors))
     notifier = NotificationDispatcher(config)
-    engine = DetectionEngine(database, detectors, whitelist=config.whitelist, notifier=notifier)
+    pcap_exporter = PcapExporter(config)
+    engine = DetectionEngine(
+        database, detectors, whitelist=config.whitelist, notifier=notifier, pcap_exporter=pcap_exporter
+    )
 
     if args.web:
         run_web_dashboard(database, config, blocking=False)

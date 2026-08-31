@@ -16,6 +16,7 @@ from src.database import Database
 from src.detectors import ArpSpoofDetector, Detector, DosDetector, PortScanDetector, TrafficAnomalyDetector
 from src.notifications import NotificationDispatcher
 from src.packet_info import PacketInfo
+from src.pcap_export import PcapExporter
 
 logger = logging.getLogger("netsentry.engine")
 
@@ -95,6 +96,7 @@ class DetectionEngine:
         detectors: List[Detector],
         whitelist: List[str] | None = None,
         notifier: NotificationDispatcher | None = None,
+        pcap_exporter: PcapExporter | None = None,
     ) -> None:
         # detectors should already be built/configured by build_detectors() before
         # they get here, this class doesn't do any of that itself
@@ -102,6 +104,7 @@ class DetectionEngine:
         self.detectors = detectors
         self._whitelist_networks = _parse_whitelist(whitelist or [])
         self.notifier = notifier
+        self.pcap_exporter = pcap_exporter
         self._packet_count = 0
         self._event_count = 0
 
@@ -130,6 +133,11 @@ class DetectionEngine:
         """This is the callback the sniffer calls per packet. Runs it through
         every detector and logs whatever comes back."""
         self._packet_count += 1
+        if self.pcap_exporter is not None:
+            try:
+                self.pcap_exporter.add_packet(packet)
+            except Exception:  # noqa: BLE001 - buffering failures must not affect capture
+                logger.exception("PcapExporter raised an exception buffering a packet")
         if self._is_whitelisted(packet.src_ip):
             logger.debug("Skipping detection for whitelisted source IP %s", packet.src_ip)
             return
@@ -153,3 +161,8 @@ class DetectionEngine:
                         self.notifier.notify(event)
                     except Exception:  # noqa: BLE001 - notification failures must not affect capture
                         logger.exception("NotificationDispatcher raised an exception")
+                if self.pcap_exporter is not None:
+                    try:
+                        self.pcap_exporter.export(event, packet)
+                    except Exception:  # noqa: BLE001 - pcap export failures must not affect capture
+                        logger.exception("PcapExporter raised an exception")

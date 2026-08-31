@@ -71,6 +71,16 @@ notifications:
     # to_addr: "you@example.com"
     # use_tls: true
 
+# PCAP export: automatically save a short window of raw traffic to .pcap
+# files whenever a critical event fires (SYN flood, ARP spoofing, traffic
+# anomalies, port scans), so it's there for later analysis (e.g. in
+# Wireshark). Disabled by default -- see README.md "PCAP Export" for setup.
+# pcap_export:
+#   enabled: true
+#   output_dir: "captures/"
+#   max_file_size_mb: 50 # rotate to a new file once an export would exceed this
+#   capture_window_seconds: 10 # seconds of buffered context to include before the event
+
 database:
   path: netsentry.db
 

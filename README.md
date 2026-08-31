@@ -106,6 +106,7 @@ netsentry/
 │   ├── logging_config.py         # Console + rotating file logging
 │   ├── detectors.py              # Detector interface + all four detectors
 │   ├── notifications.py          # Discord / Telegram / email alert dispatch
+│   ├── pcap_export.py            # Auto .pcap export of critical-event traffic
 │   ├── web.py                    # Flask app, JSON API, self-signed TLS setup
 │   └── templates/
 │       └── dashboard.html
@@ -120,6 +121,7 @@ netsentry/
     ├── test_sniffer.py
     ├── test_engine.py
     ├── test_notifications.py
+    ├── test_pcap_export.py
     └── test_web_app.py
 ```
 
@@ -413,6 +415,46 @@ notifications:
     to_addr: "you@example.com"
     use_tls: true
 ```
+
+---
+
+## PCAP Export
+
+NetSentry can automatically save the raw traffic around a critical event
+(SYN flood, ARP spoofing, traffic anomalies, port scans) to a `.pcap` file,
+so you have the actual packets to dig into later instead of just the
+one-line alert. It's configured under `pcap_export` in `config.yaml` and
+disabled by default — see the commented example already in the shipped
+`config.yaml`.
+
+While enabled, `PcapExporter` keeps a small rolling buffer of the raw
+packets it's seen, covering the last `capture_window_seconds` seconds. When
+a critical event fires, that buffer (context from just before the event,
+plus the triggering packet) gets written out to a `.pcap` file under
+`output_dir`, which is created automatically if it doesn't exist yet. If a
+single export would exceed `max_file_size_mb`, it's split across multiple
+numbered files instead of one giant one. Like notifications, exports are
+throttled by `notifications.cooldown` per source IP + event type, so a
+sustained attack produces one `.pcap` per cooldown window rather than
+hundreds of them — and a full disk or a bad `output_dir` just logs a
+warning and gets skipped, it never takes down packet capture.
+
+Files are named `{event_type}_{source_ip}_{timestamp}.pcap` (e.g.
+`SYN_FLOOD_198.51.100.7_20260831T120000.pcap`), with anything unsafe for a
+filename sanitized out.
+
+```yaml
+pcap_export:
+  enabled: true
+  output_dir: "captures/"
+  max_file_size_mb: 50
+  capture_window_seconds: 10
+```
+
+To inspect an exported capture, open it with [Wireshark](https://www.wireshark.org/)
+(`File → Open`, or just double-click the file if Wireshark's registered as
+the default `.pcap` handler), or from the command line with `tcpdump -r` /
+`tshark -r`.
 
 ---
 

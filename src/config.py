@@ -116,6 +116,21 @@ class NotificationsConfig:
 
 
 @dataclass
+class PcapExportConfig:
+    """Settings for automatically exporting suspicious traffic to .pcap
+    files -- see src/pcap_export.py. Disabled by default; opting in means
+    setting enabled: true in config.yaml."""
+
+    enabled: bool = False
+    output_dir: str = "captures/"
+    # rotate to a new file once a single export would exceed this size
+    max_file_size_mb: int = 50
+    # how many seconds of buffered context to keep around/export alongside
+    # the packet that actually triggered a critical event
+    capture_window_seconds: int = 10
+
+
+@dataclass
 class WebConfig:
     """Flask dashboard settings."""
 
@@ -147,6 +162,7 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     web: WebConfig = field(default_factory=WebConfig)
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
+    pcap_export: PcapExportConfig = field(default_factory=PcapExportConfig)
 
 
 def _merge_dataclass(instance: Any, overrides: Dict[str, Any]) -> Any:
