@@ -83,6 +83,14 @@ def create_app(
         }
         return jsonify(stats)
 
+    @app.route("/api/blocked_ips")
+    def api_blocked_ips() -> Any:
+        """JSON list of currently-blocked IPs (see AutoBlocker in
+        src/auto_block.py), newest first. Read-only -- blocks/unblocks
+        happen from the detection engine, not the dashboard."""
+        blocked = database.get_blocked_ips()
+        return jsonify([b.to_dict() for b in blocked])
+
     @app.route("/healthz")
     def healthz() -> Any:
         """just so uptime monitors have something to ping"""

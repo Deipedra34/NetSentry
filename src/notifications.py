@@ -28,6 +28,18 @@ logger = logging.getLogger("netsentry.notifications")
 # to distinguish "probing" from "worse".
 CRITICAL_EVENT_TYPES = {"SYN_FLOOD", "ARP_SPOOF", "TRAFFIC_ANOMALY", "PORT_SCAN"}
 
+# Relative ranking within CRITICAL_EVENT_TYPES, low to high -- formalizes the
+# informal ordering described above. Used by AutoBlocker's min_severity gate
+# (src/auto_block.py) to decide which critical events are worth an automatic
+# firewall block, not just a notification.
+SEVERITY_LEVELS = ["low", "medium", "high", "critical"]
+EVENT_SEVERITY: Dict[str, str] = {
+    "PORT_SCAN": "low",
+    "TRAFFIC_ANOMALY": "medium",
+    "ARP_SPOOF": "high",
+    "SYN_FLOOD": "critical",
+}
+
 
 class NotificationDispatcher:
     """Fans a critical Event out to whichever channels are enabled.

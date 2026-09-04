@@ -26,6 +26,7 @@ import sys
 import threading
 from typing import List, Optional
 
+from src.auto_block import AutoBlocker
 from src.config import Config, load_config
 from src.database import Database
 from src.engine import DETECTOR_NAMES, DetectionEngine, build_detectors
@@ -80,6 +81,20 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--list-interfaces",
         action="store_true",
         help="List available network interfaces and exit.",
+    )
+    auto_block_group = parser.add_mutually_exclusive_group()
+    auto_block_group.add_argument(
+        "--auto-block-dry-run",
+        action="store_true",
+        help="Force auto_block into dry-run mode (log only, never touch the firewall), overriding config.yaml.",
+    )
+    auto_block_group.add_argument(
+        "--auto-block-live",
+        action="store_true",
+        help=(
+            "Force auto_block into live mode (actually apply firewall rules), overriding "
+            "config.yaml. Only use this once you're sure -- see README.md 'Automatic Blocking'."
+        ),
     )
     parser.add_argument(
         "--version",
@@ -168,8 +183,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Error: invalid configuration file: {exc}", file=sys.stderr)
         return 1
 
+    if args.auto_block_dry_run:
+        config.auto_block.dry_run = True
+    elif args.auto_block_live:
+        config.auto_block.dry_run = False
+
     setup_logging(level=config.logging.level, log_file=config.logging.file)
     logger.info("NetSentry starting up")
+
+    if config.auto_block.enabled:
+        if config.auto_block.dry_run:
+            logger.info("Auto-block is enabled in DRY-RUN mode -- no firewall rules will be applied.")
+        else:
+            logger.warning(
+                "Auto-block is enabled in LIVE mode -- firewall rules WILL be applied to block source IPs."
+            )
 
     database = Database(config.database.path)
 
@@ -192,8 +220,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("Active detectors: %s", ", ".join(d.name for d in detectors))
     notifier = NotificationDispatcher(config)
     pcap_exporter = PcapExporter(config)
+    auto_blocker = AutoBlocker(config, database, whitelist=config.whitelist)
     engine = DetectionEngine(
-        database, detectors, whitelist=config.whitelist, notifier=notifier, pcap_exporter=pcap_exporter
+        database,
+        detectors,
+        whitelist=config.whitelist,
+        notifier=notifier,
+        pcap_exporter=pcap_exporter,
+        auto_blocker=auto_blocker,
     )
 
     if args.web:

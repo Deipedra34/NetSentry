@@ -289,6 +289,8 @@ python main.py --help
 --web                   Also start the dashboard alongside capture
 --web-only              Only run the dashboard (no capture)
 --list-interfaces       List available interfaces and exit
+--auto-block-dry-run    Force auto_block dry-run mode, overriding config.yaml
+--auto-block-live       Force auto_block live mode, overriding config.yaml
 --version               Print version and exit
 ```
 
@@ -455,6 +457,99 @@ To inspect an exported capture, open it with [Wireshark](https://www.wireshark.o
 (`File → Open`, or just double-click the file if Wireshark's registered as
 the default `.pcap` handler), or from the command line with `tcpdump -r` /
 `tshark -r`.
+
+---
+
+## Automatic Blocking
+
+> **⚠️ Warning:** this feature applies real firewall rules that can block
+> legitimate traffic if it's misconfigured — a false positive on a busy or
+> shared network could cut off a real user, or even yourself. `dry_run`
+> defaults to `true` for exactly this reason: it's the safety net that keeps
+> a fresh install from ever touching your firewall by accident. Only flip it
+> to `false` once you've watched `dry_run` output for a while and are
+> confident the thresholds you're using aren't going to catch anything you
+> care about.
+
+NetSentry can automatically block the source IP behind a critical event
+(SYN flood, ARP spoofing, traffic anomalies, or port scans, same as
+notifications/PCAP export) at the OS firewall level, via `AutoBlocker` in
+`src/auto_block.py`. It's configured under `auto_block` in `config.yaml` and
+disabled by default — see the commented example already in the shipped
+`config.yaml`.
+
+**How it decides what to block:**
+
+1. `auto_block.enabled` must be `true`.
+2. The event's type must meet or exceed `auto_block.min_severity`
+   (`low` / `medium` / `high` / `critical` — port scans are `low`, traffic
+   anomalies `medium`, ARP spoofing `high`, SYN floods `critical`).
+3. The source IP must **not** be on the `whitelist` — this is a hard rule,
+   checked independently of any config, never overridden.
+4. The source IP must **not** be a private/local address (loopback,
+   RFC1918, link-local) — also a hard rule, in case an event is ever
+   somehow attributed to one.
+5. The IP must not already have an active block.
+
+If all of that passes, `AutoBlocker` runs an OS-appropriate command via
+`subprocess`, logged in full at INFO level before it runs:
+
+- **Windows** — `netsh advfirewall firewall add rule name=NetSentry_Block_<ip> dir=in action=block remoteip=<ip>`.
+  Requires an Administrator terminal; `netsh` fails silently otherwise (and
+  the failure is caught and logged as a warning, not raised).
+- **Linux** — `iptables -A INPUT -s <ip> -j DROP`. Requires root and
+  `iptables` to be installed; same story if either is missing.
+- Any other OS just logs a warning and skips blocking — it never crashes
+  the engine.
+
+Every applied block is written to the `blocked_ips` table (source IP,
+`blocked_at`, `expires_at`, the event type that triggered it, and the
+firewall rule's identifier) so blocks survive a restart. If
+`block_duration_minutes` is nonzero, the block is automatically lifted once
+it expires — `AutoBlocker` checks for expired blocks about once a minute
+(piggybacking on the same per-packet callback the engine already uses, no
+extra thread involved) and removes both the firewall rule and the database
+row. Set `block_duration_minutes: 0` for a permanent block that only comes
+off manually.
+
+**`dry_run` (default `true`)** — when true, nothing above actually touches
+the firewall: `AutoBlocker` logs exactly what command it *would* have run
+and stops there, no `netsh`/`iptables` call, no database row. Use it to
+watch what auto-blocking would do against your real traffic before trusting
+it to act. You can also override `dry_run` at launch without editing
+`config.yaml`, which is the explicit, visible way to confirm you actually
+want live blocking for this run:
+
+```bash
+python main.py -i eth0 --auto-block-live   # force live mode for this run
+python main.py -i eth0 --auto-block-dry-run   # force dry-run, even if config.yaml has it off
+```
+
+```yaml
+auto_block:
+  enabled: true
+  block_duration_minutes: 60   # 0 = permanent, until manually unblocked
+  min_severity: high             # low | medium | high | critical
+  dry_run: false   # only after you've verified dry-run output looks right
+```
+
+The dashboard's **Blocked IPs** table (below the events table) shows every
+currently-blocked IP, the event type that triggered it, and when it was
+blocked/expires — read-only, sourced from `/api/blocked_ips`.
+
+**If something goes wrong** — a block you didn't want, or you just want to
+clear everything out:
+
+1. Check what's currently tracked: open the dashboard's Blocked IPs table,
+   or query the database directly —
+   `sqlite3 netsentry.db "SELECT * FROM blocked_ips;"`.
+2. Remove the firewall rule manually:
+   - **Windows:** `netsh advfirewall firewall delete rule name=NetSentry_Block_<ip>`
+   - **Linux:** `iptables -D INPUT -s <ip> -j DROP`
+3. Remove the tracking row so the dashboard/database stay in sync:
+   `sqlite3 netsentry.db "DELETE FROM blocked_ips WHERE source_ip = '<ip>';"`.
+4. To stop auto-blocking entirely, set `auto_block.enabled: false` (or pass
+   `--auto-block-dry-run`) and restart.
 
 ---
 

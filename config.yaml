@@ -81,6 +81,19 @@ notifications:
 #   max_file_size_mb: 50 # rotate to a new file once an export would exceed this
 #   capture_window_seconds: 10 # seconds of buffered context to include before the event
 
+# Automatic IP blocking: apply an OS firewall rule (netsh on Windows,
+# iptables on Linux) to a source IP the moment a critical event fires
+# (same event types as notifications/pcap_export above). Disabled by
+# default, and dry_run defaults to true even once enabled -- READ
+# README.md "Automatic Blocking" in full before turning this on for real,
+# it can block legitimate traffic if misconfigured.
+# auto_block:
+#   enabled: true
+#   block_duration_minutes: 60 # 0 = permanent, until manually unblocked
+#   min_severity: high # low | medium | high | critical -- only events at or above this get blocked
+#   dry_run: false # set to false only when you are sure -- defaults to true so nobody
+#                   # accidentally locks themselves out of their own network
+
 database:
   path: netsentry.db
 

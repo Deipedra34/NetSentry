@@ -11,6 +11,7 @@ import ipaddress
 import logging
 from typing import Dict, List, Union
 
+from src.auto_block import AutoBlocker
 from src.config import Config
 from src.database import Database
 from src.detectors import ArpSpoofDetector, Detector, DosDetector, PortScanDetector, TrafficAnomalyDetector
@@ -97,6 +98,7 @@ class DetectionEngine:
         whitelist: List[str] | None = None,
         notifier: NotificationDispatcher | None = None,
         pcap_exporter: PcapExporter | None = None,
+        auto_blocker: AutoBlocker | None = None,
     ) -> None:
         # detectors should already be built/configured by build_detectors() before
         # they get here, this class doesn't do any of that itself
@@ -105,6 +107,7 @@ class DetectionEngine:
         self._whitelist_networks = _parse_whitelist(whitelist or [])
         self.notifier = notifier
         self.pcap_exporter = pcap_exporter
+        self.auto_blocker = auto_blocker
         self._packet_count = 0
         self._event_count = 0
 
@@ -138,6 +141,11 @@ class DetectionEngine:
                 self.pcap_exporter.add_packet(packet)
             except Exception:  # noqa: BLE001 - buffering failures must not affect capture
                 logger.exception("PcapExporter raised an exception buffering a packet")
+        if self.auto_blocker is not None:
+            try:
+                self.auto_blocker.maybe_check_expired()
+            except Exception:  # noqa: BLE001 - expiry-check failures must not affect capture
+                logger.exception("AutoBlocker raised an exception checking for expired blocks")
         if self._is_whitelisted(packet.src_ip):
             logger.debug("Skipping detection for whitelisted source IP %s", packet.src_ip)
             return
@@ -166,3 +174,8 @@ class DetectionEngine:
                         self.pcap_exporter.export(event, packet)
                     except Exception:  # noqa: BLE001 - pcap export failures must not affect capture
                         logger.exception("PcapExporter raised an exception")
+                if self.auto_blocker is not None:
+                    try:
+                        self.auto_blocker.maybe_block(event)
+                    except Exception:  # noqa: BLE001 - auto-block failures must not affect capture
+                        logger.exception("AutoBlocker raised an exception")

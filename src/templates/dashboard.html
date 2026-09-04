@@ -150,9 +150,24 @@
       <tr><td colspan="4" class="empty">Waiting for events&hellip;</td></tr>
     </tbody>
   </table>
+
+  <h2 style="font-size: 1.05rem; margin: 2rem 0 0.75rem;">Blocked IPs</h2>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 10rem;">Source IP</th>
+        <th style="width: 10rem;">Event Type</th>
+        <th style="width: 12rem;">Blocked At</th>
+        <th style="width: 12rem;">Expires At</th>
+      </tr>
+    </thead>
+    <tbody id="blocked-ips-body">
+      <tr><td colspan="4" class="empty">No IPs currently blocked.</td></tr>
+    </tbody>
+  </table>
 </main>
 <footer>
-  NetSentry auto-refreshes every <code>{{ refresh_interval }}</code>s &middot; API: <code>/api/events</code>, <code>/api/stats</code>
+  NetSentry auto-refreshes every <code>{{ refresh_interval }}</code>s &middot; API: <code>/api/events</code>, <code>/api/stats</code>, <code>/api/blocked_ips</code>
   <br>by Deipedra
 </footer>
 
@@ -167,12 +182,14 @@ function escapeHtml(str) {
 
 async function refreshEvents() {
   try {
-    const [eventsRes, statsRes] = await Promise.all([
+    const [eventsRes, statsRes, blockedRes] = await Promise.all([
       fetch("/api/events?limit=100"),
       fetch("/api/stats"),
+      fetch("/api/blocked_ips"),
     ]);
     const events = await eventsRes.json();
     const stats = await statsRes.json();
+    const blockedIps = await blockedRes.json();
 
     document.getElementById("stat-total").textContent = stats.total_events ?? 0;
     for (const type of ["PORT_SCAN", "ARP_SPOOF", "SYN_FLOOD", "TRAFFIC_ANOMALY"]) {
@@ -190,6 +207,20 @@ async function refreshEvents() {
           <td>${escapeHtml(ev.source_ip)}</td>
           <td><span class="badge ${escapeHtml(ev.event_type)}">${escapeHtml(ev.event_type)}</span></td>
           <td>${escapeHtml(ev.details)}</td>
+        </tr>
+      `).join("");
+    }
+
+    const blockedBody = document.getElementById("blocked-ips-body");
+    if (!blockedIps.length) {
+      blockedBody.innerHTML = '<tr><td colspan="4" class="empty">No IPs currently blocked.</td></tr>';
+    } else {
+      blockedBody.innerHTML = blockedIps.map(b => `
+        <tr>
+          <td>${escapeHtml(b.source_ip)}</td>
+          <td><span class="badge ${escapeHtml(b.event_type)}">${escapeHtml(b.event_type)}</span></td>
+          <td>${escapeHtml(b.blocked_at)}</td>
+          <td>${escapeHtml(b.expires_at ?? "never")}</td>
         </tr>
       `).join("");
     }

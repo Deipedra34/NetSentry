@@ -131,6 +131,23 @@ class PcapExportConfig:
 
 
 @dataclass
+class AutoBlockConfig:
+    """Automatic firewall blocking of source IPs behind critical events --
+    see src/auto_block.py. Disabled by default, and dry_run defaults to
+    true even once enabled, so opting in never silently blocks real traffic
+    -- see README.md "Automatic Blocking" for the full safety rundown."""
+
+    enabled: bool = False
+    # minutes a block stays in place before AutoBlocker lifts it again; 0 = permanent
+    block_duration_minutes: int = 60
+    # only events at or above this level get blocked -- see EVENT_SEVERITY /
+    # SEVERITY_LEVELS in src/notifications.py for the ranking
+    min_severity: str = "high"
+    # log what WOULD be blocked instead of actually touching the firewall
+    dry_run: bool = True
+
+
+@dataclass
 class WebConfig:
     """Flask dashboard settings."""
 
@@ -163,6 +180,7 @@ class Config:
     web: WebConfig = field(default_factory=WebConfig)
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     pcap_export: PcapExportConfig = field(default_factory=PcapExportConfig)
+    auto_block: AutoBlockConfig = field(default_factory=AutoBlockConfig)
 
 
 def _merge_dataclass(instance: Any, overrides: Dict[str, Any]) -> Any:

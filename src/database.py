@@ -41,6 +41,32 @@ class Event:
         }
 
 
+@dataclass
+class BlockedIP:
+    """One currently-active firewall block applied by AutoBlocker (see
+    src/auto_block.py). expires_at is None for a permanent block
+    (block_duration_minutes: 0). Row is deleted once the block is lifted --
+    this table only ever holds *currently* blocked IPs, not history.
+    """
+
+    source_ip: str
+    event_type: str
+    rule_identifier: str
+    blocked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: Optional[datetime] = None
+    id: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """for jsonify() basically, converts to plain dict"""
+        return {
+            "id": self.id,
+            "source_ip": self.source_ip,
+            "event_type": self.event_type,
+            "blocked_at": self.blocked_at.isoformat(),
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+        }
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,7 +77,29 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events (timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_source_ip ON events (source_ip);
+
+CREATE TABLE IF NOT EXISTS blocked_ips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_ip TEXT NOT NULL,
+    blocked_at TEXT NOT NULL,
+    expires_at TEXT,
+    event_type TEXT NOT NULL,
+    rule_identifier TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_blocked_ips_source_ip ON blocked_ips (source_ip);
+CREATE INDEX IF NOT EXISTS idx_blocked_ips_expires_at ON blocked_ips (expires_at);
 """
+
+
+def _row_to_blocked_ip(row: sqlite3.Row) -> BlockedIP:
+    return BlockedIP(
+        id=row["id"],
+        source_ip=row["source_ip"],
+        blocked_at=datetime.fromisoformat(row["blocked_at"]),
+        expires_at=datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None,
+        event_type=row["event_type"],
+        rule_identifier=row["rule_identifier"],
+    )
 
 
 class Database:
@@ -131,6 +179,63 @@ class Database:
                 "SELECT event_type, COUNT(*) AS c FROM events GROUP BY event_type"
             ).fetchall()
         return {row["event_type"]: row["c"] for row in rows}
+
+    def add_blocked_ip(self, blocked: BlockedIP) -> BlockedIP:
+        """Saves a new block, sets its id from the new row and hands back the
+        same object (mutated in place, not a copy)."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO blocked_ips (source_ip, blocked_at, expires_at, event_type, rule_identifier) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    blocked.source_ip,
+                    blocked.blocked_at.isoformat(),
+                    blocked.expires_at.isoformat() if blocked.expires_at else None,
+                    blocked.event_type,
+                    blocked.rule_identifier,
+                ),
+            )
+            self._conn.commit()
+            blocked.id = cursor.lastrowid
+        return blocked
+
+    def get_blocked_ips(self) -> List[BlockedIP]:
+        """Every currently-tracked block, newest first -- for the dashboard."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, source_ip, blocked_at, expires_at, event_type, rule_identifier "
+                "FROM blocked_ips ORDER BY id DESC"
+            ).fetchall()
+        return [_row_to_blocked_ip(row) for row in rows]
+
+    def get_active_block(self, source_ip: str) -> Optional[BlockedIP]:
+        """The current block for source_ip, if any -- lets AutoBlocker skip
+        re-blocking an IP that's already blocked."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, source_ip, blocked_at, expires_at, event_type, rule_identifier "
+                "FROM blocked_ips WHERE source_ip = ?",
+                (source_ip,),
+            ).fetchone()
+        return _row_to_blocked_ip(row) if row else None
+
+    def get_expired_blocks(self, now: Optional[datetime] = None) -> List[BlockedIP]:
+        """Blocks whose expires_at has passed (permanent blocks, expires_at
+        IS NULL, never show up here)."""
+        now = now or datetime.now(timezone.utc)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, source_ip, blocked_at, expires_at, event_type, rule_identifier "
+                "FROM blocked_ips WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                (now.isoformat(),),
+            ).fetchall()
+        return [_row_to_blocked_ip(row) for row in rows]
+
+    def remove_blocked_ip(self, blocked_id: int) -> None:
+        """Drops the tracking row once a block's been lifted at the firewall."""
+        with self._lock:
+            self._conn.execute("DELETE FROM blocked_ips WHERE id = ?", (blocked_id,))
+            self._conn.commit()
 
     def close(self) -> None:
         """closes the connection, call this when you're done with it"""
