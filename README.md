@@ -21,7 +21,7 @@ database, and surfaces them on a self-refreshing Flask dashboard.
 
 ## Features
 
-NetSentry ships with four independent detectors, each individually
+NetSentry ships with five independent detectors, each individually
 configurable and individually toggleable:
 
 | Detector | What it catches | Signal |
@@ -30,6 +30,7 @@ configurable and individually toggleable:
 | **ARP Spoofing** | ARP cache poisoning / MITM setup | One IP address observed bound to more than one MAC address |
 | **SYN Flood / Basic DoS** | Volumetric TCP SYN flood | ≥ *N* SYN packets from one source IP within *T* seconds |
 | **Traffic Anomaly** | General statistical spikes in traffic volume | Packets-per-window exceeding *X*× the rolling baseline average |
+| **DNS Tunneling** | Data exfiltration / C2 hidden inside DNS queries | Long or high-entropy subdomains, an excessive per-IP query rate, and/or tunneling-friendly record types (TXT/NULL/CNAME) |
 
 Every detected event is persisted with a timestamp, source IP, event type,
 and a human-readable details string, and is immediately visible on the live
@@ -52,17 +53,20 @@ flowchart LR
         ARP["ArpSpoofDetector"]
         DOS["DosDetector"]
         ANOM["TrafficAnomalyDetector"]
+        DNS["DNSTunnelDetector"]
     end
 
     Engine --> PS
     Engine --> ARP
     Engine --> DOS
     Engine --> ANOM
+    Engine --> DNS
 
     PS -->|"Event"| DB[("SQLite\nnetsentry.db")]
     ARP -->|"Event"| DB
     DOS -->|"Event"| DB
     ANOM -->|"Event"| DB
+    DNS -->|"Event"| DB
 
     DB --> Web["Flask dashboard\n(web.py)"]
     Web -->|"HTTP :5000"| Browser["Browser\n(auto-refreshing table)"]
@@ -104,7 +108,7 @@ netsentry/
 │   ├── engine.py                 # Wires detectors + database together
 │   ├── database.py               # SQLite event storage
 │   ├── logging_config.py         # Console + rotating file logging
-│   ├── detectors.py              # Detector interface + all four detectors
+│   ├── detectors.py              # Detector interface + all five detectors
 │   ├── notifications.py          # Discord / Telegram / email alert dispatch
 │   ├── pcap_export.py            # Auto .pcap export of critical-event traffic
 │   ├── web.py                    # Flask app, JSON API, self-signed TLS setup
@@ -116,6 +120,7 @@ netsentry/
     ├── test_arp_spoof.py
     ├── test_dos_detect.py
     ├── test_traffic_anomaly.py
+    ├── test_dns_tunnel.py
     ├── test_database.py
     ├── test_config.py
     ├── test_sniffer.py
@@ -339,6 +344,14 @@ traffic_anomaly:
   multiplier: 3.0
   min_baseline_samples: 3
 
+dns_tunnel:
+  enabled: true
+  max_subdomain_length: 50
+  max_queries_per_minute: 60
+  entropy_threshold: 3.5
+  suspicious_query_types: ["TXT", "NULL", "CNAME"]
+  cooldown: 60
+
 web:
   host: 127.0.0.1
   port: 5000
@@ -368,8 +381,9 @@ A debug-level log line is emitted each time a packet is skipped this way.
 ## Notifications
 
 NetSentry can push critical alerts (SYN flood, ARP spoofing, traffic
-anomalies, and port scans) out to Discord, Telegram, and/or email as they
-happen, in addition to logging them and writing them to the dashboard. All
+anomalies, port scans, and DNS tunneling) out to Discord, Telegram, and/or
+email as they happen, in addition to logging them and writing them to the
+dashboard. All
 three channels are independently configurable under `notifications` in
 `config.yaml` and default to disabled — see the commented examples already
 in the shipped `config.yaml`. Each channel fails independently (a bad
@@ -423,7 +437,7 @@ notifications:
 ## PCAP Export
 
 NetSentry can automatically save the raw traffic around a critical event
-(SYN flood, ARP spoofing, traffic anomalies, port scans) to a `.pcap` file,
+(SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling) to a `.pcap` file,
 so you have the actual packets to dig into later instead of just the
 one-line alert. It's configured under `pcap_export` in `config.yaml` and
 disabled by default — see the commented example already in the shipped
@@ -472,8 +486,8 @@ the default `.pcap` handler), or from the command line with `tcpdump -r` /
 > care about.
 
 NetSentry can automatically block the source IP behind a critical event
-(SYN flood, ARP spoofing, traffic anomalies, or port scans, same as
-notifications/PCAP export) at the OS firewall level, via `AutoBlocker` in
+(SYN flood, ARP spoofing, traffic anomalies, port scans, or DNS tunneling,
+same as notifications/PCAP export) at the OS firewall level, via `AutoBlocker` in
 `src/auto_block.py`. It's configured under `auto_block` in `config.yaml` and
 disabled by default — see the commented example already in the shipped
 `config.yaml`.
@@ -483,7 +497,8 @@ disabled by default — see the commented example already in the shipped
 1. `auto_block.enabled` must be `true`.
 2. The event's type must meet or exceed `auto_block.min_severity`
    (`low` / `medium` / `high` / `critical` — port scans are `low`, traffic
-   anomalies `medium`, ARP spoofing `high`, SYN floods `critical`).
+   anomalies `medium`, ARP spoofing and DNS tunneling `high`, SYN floods
+   `critical`).
 3. The source IP must **not** be on the `whitelist` — this is a hard rule,
    checked independently of any config, never overridden.
 4. The source IP must **not** be a private/local address (loopback,
@@ -553,6 +568,51 @@ clear everything out:
 
 ---
 
+## DNS Tunneling Detection
+
+DNS tunneling encodes arbitrary data into DNS queries (and the responses to
+them) so it can slip past firewalls that allow port 53 but little else —
+it's a common channel for data exfiltration and for command-and-control
+traffic to malware. NetSentry's `DNSTunnelDetector` (`src/detectors.py`)
+inspects every outbound DNS *query* and scores it on four independent
+signals; no single weak signal alerts on its own, but a strong one — or a
+suspicious record type combined with any elevated signal — raises a
+`DNS_TUNNEL` event that flows through notifications, PCAP export, the
+whitelist, and auto-block exactly like every other detector. A per-source
+`cooldown` keeps a sustained tunnel to one alert per interval.
+
+Thresholds (under `dns_tunnel` in `config.yaml`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Turn the detector on/off. |
+| `max_subdomain_length` | `50` | Flag a query whose longest subdomain label is longer than this. Encoded payloads need lots of characters, so tunnel labels are often near the 63-character DNS maximum. |
+| `max_queries_per_minute` | `60` | Flag a source IP issuing more DNS queries than this within a rolling 60-second window. A tunnel has to send many queries to move any real volume of data. |
+| `entropy_threshold` | `3.5` | Flag a subdomain whose Shannon entropy (bits per character) exceeds this. Real hostnames are mostly dictionary words (~3 bits); base32/base64/hex-encoded data looks far more random (4+ bits). |
+| `suspicious_query_types` | `["TXT", "NULL", "CNAME"]` | Record types that can carry arbitrary data back to the client, so tunneling tools lean on them. Weighted, not decisive: a suspicious type only tips an alert when paired with another elevated signal. |
+| `cooldown` | `60` | Seconds to wait before re-alerting on the same source IP. |
+
+**Tuning guidance.** These defaults are deliberately sensitive and *will*
+need per-network tuning. Legitimate traffic that can trip them includes:
+
+- **CDNs and cloud providers** (Akamai, CloudFront, Fastly, Azure) routinely
+  use long, random-looking subdomain labels — raise `max_subdomain_length`
+  (to ~70) and `entropy_threshold` (to ~4.0) if these dominate your false
+  positives.
+- **Anti-spam / reputation lookups** (DNSBLs), antivirus and EDR agents, and
+  telemetry-heavy applications can each push a single host well past 60
+  queries/minute — raise `max_queries_per_minute` for networks with busy
+  servers, or add the offending hosts to the `whitelist`.
+- Some services genuinely use lots of `TXT` lookups (SPF/DKIM checks, ACME
+  domain validation) — drop `TXT` from `suspicious_query_types` if that's
+  noisy in your environment.
+
+Watch the alerts against known-good traffic for a while before wiring this
+detector into auto-block, and prefer whitelisting known chatty hosts over
+loosening the thresholds for everyone.
+
+---
+
 ## Testing
 
 The full test suite runs entirely offline against synthetic packet data —
@@ -566,7 +626,8 @@ pytest -q
 
 Each detector has a dedicated test file (`tests/test_<detector>.py`)
 covering both the "should not alert" and "should alert" paths, plus edge
-cases like sliding-window expiry and per-IP isolation. `tests/test_sniffer.py`
+cases like sliding-window expiry, per-IP isolation, and (for the DNS tunnel
+detector) each scoring signal in isolation. `tests/test_sniffer.py`
 crafts real Scapy packets in memory to validate packet parsing without
 touching a network interface.
 
@@ -574,7 +635,7 @@ touching a network interface.
 
 ## How each detector works
 
-All four live in `src/detectors.py`:
+All five live in `src/detectors.py`:
 
 - **Port Scan** (`PortScanDetector`): maintains a per-source-IP map of
   `{port: last_seen_timestamp}`, prunes entries older than the configured
@@ -590,6 +651,12 @@ All four live in `src/detectors.py`:
   fixed-size time windows, keeps a rolling average of the last *N* completed
   windows as a baseline, and alerts when a window's packet count exceeds
   `multiplier × baseline average`.
+- **DNS Tunneling** (`DNSTunnelDetector`): for each DNS query, measures the
+  longest subdomain label length, the Shannon entropy of the subdomain, the
+  source IP's query rate over a rolling 60s window, and the record type;
+  combines those into a score and alerts once it crosses the trigger
+  threshold, naming the signals that fired. See
+  [DNS Tunneling Detection](#dns-tunneling-detection) for tuning.
 
 All detectors implement per-source cooldowns so a sustained attack produces
 one alert per cooldown period rather than one per packet.

@@ -40,6 +40,11 @@ class PacketInfo:
     tcp_flags: Optional[str] = None
     is_arp: bool = False
     arp_op: Optional[int] = None
+    # DNS query fields, only set for DNS query packets (qr == 0) -- see
+    # sniffer.py. dns_qname is the queried domain (e.g. "www.example.com"),
+    # dns_qtype the record type as a string (e.g. "A", "TXT", "CNAME").
+    dns_qname: Optional[str] = None
+    dns_qtype: Optional[str] = None
     length: int = 0
     # original Scapy packet object, if this PacketInfo came from a live
     # capture (sniffer.py sets it) -- None for hand-built test packets

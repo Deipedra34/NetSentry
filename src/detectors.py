@@ -9,6 +9,7 @@ with just made-up packets instead of a real capture.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict, deque
 from typing import Deque, Dict, List, Optional
@@ -23,7 +24,36 @@ __all__ = [
     "ArpSpoofDetector",
     "DosDetector",
     "TrafficAnomalyDetector",
+    "DNSTunnelDetector",
 ]
+
+
+def _shannon_entropy(text: str) -> float:
+    """Shannon entropy of `text` in bits per character.
+
+    Normal hostnames are mostly dictionary words and sit around 3-3.5 bits;
+    base32/base64/hex-encoded tunnel payloads pack in far more randomness and
+    push well above that, which is what `entropy_threshold` keys off of.
+    """
+    if not text:
+        return 0.0
+    counts = Counter(text)
+    length = len(text)
+    return -sum(
+        (n / length) * math.log2(n / length) for n in counts.values()
+    )
+
+
+def _subdomain_labels(qname: str) -> List[str]:
+    """The subdomain portion of `qname` -- every label except the last two.
+
+    "www.example.com" -> ["www"], "a.b.c.example.com" -> ["a", "b", "c"],
+    "example.com" -> []. This is a deliberately cheap eTLD+1 approximation
+    (no Public Suffix List), which is plenty for spotting the giant encoded
+    labels tunneling tools stack in front of their own domain.
+    """
+    labels = [label for label in qname.split(".") if label]
+    return labels[:-2] if len(labels) > 2 else []
 
 
 class Detector(ABC):
@@ -308,3 +338,130 @@ class TrafficAnomalyDetector(Detector):
 
         self._baseline.append(count)
         return events
+
+
+class DNSTunnelDetector(Detector):
+    """Flags DNS query patterns that look like tunneling (exfil / C2).
+
+    Tools like iodine, dnscat2 and DNS-based C2 smuggle data through DNS by
+    encoding it into the query name and leaning on record types that return
+    arbitrary data (TXT, NULL, CNAME). That leaves four observable
+    fingerprints, and this detector scores a query on all of them:
+
+      1. an over-long subdomain label (`max_subdomain_length`)
+      2. a high-Shannon-entropy subdomain (`entropy_threshold`) -- encoded
+         payloads look far more random than real hostnames
+      3. a high per-source query rate in a rolling 60s window
+         (`max_queries_per_minute`)
+      4. a suspicious record type (`suspicious_query_types`)
+
+    No single weak signal fires an alert on its own; a strong signal, or a
+    suspicious query type combined with any elevated signal, does. The event
+    details spell out exactly which signals tripped. A per-source cooldown
+    keeps a sustained tunnel to one alert per `cooldown` seconds.
+    """
+
+    name = "DNS_TUNNEL"
+
+    # queries in the rolling window are always measured over 60 seconds --
+    # `max_queries_per_minute` is a per-minute figure by definition
+    WINDOW_SECONDS = 60.0
+    # score needed to raise an alert; strong signals are worth 2, elevated
+    # ("close but under threshold") signals and a suspicious query type 1
+    TRIGGER_SCORE = 2.0
+
+    def __init__(
+        self,
+        max_subdomain_length: int = 50,
+        max_queries_per_minute: int = 60,
+        entropy_threshold: float = 3.5,
+        suspicious_query_types: Optional[List[str]] = None,
+        cooldown: float = 60.0,
+    ) -> None:
+        self.max_subdomain_length = max_subdomain_length
+        self.max_queries_per_minute = max_queries_per_minute
+        self.entropy_threshold = entropy_threshold
+        self.suspicious_query_types = [
+            qtype.upper()
+            for qtype in (
+                suspicious_query_types
+                if suspicious_query_types is not None
+                else ["TXT", "NULL", "CNAME"]
+            )
+        ]
+        self.cooldown = cooldown
+        # src_ip -> deque of DNS query timestamps within the rolling window
+        self._query_times: Dict[str, Deque[float]] = defaultdict(deque)
+        self._last_alert: Dict[str, float] = {}
+
+    def process_packet(self, packet: PacketInfo) -> List[Event]:
+        """Scores one DNS query against all four tunneling signals and emits
+        an event if the combined score crosses ``TRIGGER_SCORE``."""
+        if packet.protocol not in ("UDP", "TCP") or not packet.src_ip:
+            return []
+        # DNS runs on port 53; sniffer.py only fills dns_qname for actual
+        # queries (qr == 0), so a missing name means "not a DNS query".
+        if 53 not in (packet.src_port, packet.dst_port) or not packet.dns_qname:
+            return []
+
+        now = packet.timestamp
+        times = self._query_times[packet.src_ip]
+        times.append(now)
+        cutoff = now - self.WINDOW_SECONDS
+        while times and times[0] < cutoff:
+            times.popleft()
+
+        score = 0.0
+        signals: List[str] = []
+
+        labels = _subdomain_labels(packet.dns_qname)
+        longest = max((len(label) for label in labels), default=0)
+        if longest > self.max_subdomain_length:
+            score += 2.0
+            signals.append(f"subdomain length: {longest}")
+        elif longest > self.max_subdomain_length * 0.6:
+            score += 1.0
+            signals.append(f"subdomain length: {longest} (elevated)")
+
+        entropy = _shannon_entropy("".join(labels))
+        if entropy > self.entropy_threshold:
+            score += 2.0
+            signals.append(f"entropy: {entropy:.1f}")
+        elif entropy > self.entropy_threshold * 0.85:
+            score += 1.0
+            signals.append(f"entropy: {entropy:.1f} (elevated)")
+
+        rate = len(times)
+        if rate > self.max_queries_per_minute:
+            score += 2.0
+            signals.append(f"query rate: {rate}/min")
+        elif rate > self.max_queries_per_minute * 0.75:
+            score += 1.0
+            signals.append(f"query rate: {rate}/min (elevated)")
+
+        qtype = (packet.dns_qtype or "").upper()
+        if qtype in self.suspicious_query_types:
+            score += 1.0
+            signals.append(f"query type: {qtype}")
+
+        if score < self.TRIGGER_SCORE:
+            return []
+
+        last_alert = self._last_alert.get(packet.src_ip, float("-inf"))
+        if now - last_alert < self.cooldown:
+            return []
+
+        self._last_alert[packet.src_ip] = now
+        details = (
+            f"Suspicious DNS query for '{packet.dns_qname}' -- "
+            + ", ".join(signals)
+            + f" (score {score:.0f}/{self.TRIGGER_SCORE:.0f})"
+        )
+        return [
+            Event(
+                event_type=self.name,
+                source_ip=packet.src_ip,
+                details=details,
+                timestamp=to_datetime(now),
+            )
+        ]

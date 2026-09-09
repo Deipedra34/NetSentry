@@ -14,7 +14,14 @@ from typing import Dict, List, Union
 from src.auto_block import AutoBlocker
 from src.config import Config
 from src.database import Database
-from src.detectors import ArpSpoofDetector, Detector, DosDetector, PortScanDetector, TrafficAnomalyDetector
+from src.detectors import (
+    ArpSpoofDetector,
+    Detector,
+    DNSTunnelDetector,
+    DosDetector,
+    PortScanDetector,
+    TrafficAnomalyDetector,
+)
 from src.notifications import NotificationDispatcher
 from src.packet_info import PacketInfo
 from src.pcap_export import PcapExporter
@@ -22,7 +29,7 @@ from src.pcap_export import PcapExporter
 logger = logging.getLogger("netsentry.engine")
 
 # names the CLI --detectors flag and config.yaml both use to refer to detectors
-DETECTOR_NAMES = ("port_scan", "arp_spoof", "dos", "traffic_anomaly")
+DETECTOR_NAMES = ("port_scan", "arp_spoof", "dos", "traffic_anomaly", "dns_tunnel")
 
 
 def build_detectors(config: Config, enabled: List[str] | None = None) -> List[Detector]:
@@ -75,6 +82,16 @@ def build_detectors(config: Config, enabled: List[str] | None = None) -> List[De
                 baseline_windows=config.traffic_anomaly.baseline_windows,
                 multiplier=config.traffic_anomaly.multiplier,
                 min_baseline_samples=config.traffic_anomaly.min_baseline_samples,
+            )
+        )
+    if wants("dns_tunnel", config.dns_tunnel.enabled):
+        detectors.append(
+            DNSTunnelDetector(
+                max_subdomain_length=config.dns_tunnel.max_subdomain_length,
+                max_queries_per_minute=config.dns_tunnel.max_queries_per_minute,
+                entropy_threshold=config.dns_tunnel.entropy_threshold,
+                suspicious_query_types=config.dns_tunnel.suspicious_query_types,
+                cooldown=config.dns_tunnel.cooldown,
             )
         )
 

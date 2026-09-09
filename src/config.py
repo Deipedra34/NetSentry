@@ -56,6 +56,30 @@ class TrafficAnomalyConfig:
 
 
 @dataclass
+class DnsTunnelConfig:
+    """Thresholds for DNS tunneling detection -- see src/detectors.py.
+
+    Tunneling hides data (exfil or C2) inside DNS queries, which shows up as
+    long, high-entropy subdomain labels, abnormally high query rates from one
+    host, and heavy use of record types like TXT/NULL/CNAME.
+    """
+
+    enabled: bool = True
+    # flag a query whose longest subdomain label exceeds this many characters
+    max_subdomain_length: int = 50
+    # flag a source IP issuing more DNS queries than this in a rolling 60s window
+    max_queries_per_minute: int = 60
+    # flag a subdomain whose Shannon entropy (bits/char) exceeds this
+    entropy_threshold: float = 3.5
+    # record types commonly abused for tunneling, weighted more heavily
+    suspicious_query_types: List[str] = field(
+        default_factory=lambda: ["TXT", "NULL", "CNAME"]
+    )
+    # seconds to wait before re-alerting on the same source IP
+    cooldown: float = 60.0
+
+
+@dataclass
 class DatabaseConfig:
     """SQLite event database settings."""
 
@@ -173,6 +197,7 @@ class Config:
     arp_spoof: ArpSpoofConfig = field(default_factory=ArpSpoofConfig)
     dos: DosConfig = field(default_factory=DosConfig)
     traffic_anomaly: TrafficAnomalyConfig = field(default_factory=TrafficAnomalyConfig)
+    dns_tunnel: DnsTunnelConfig = field(default_factory=DnsTunnelConfig)
     # source IPs/CIDR ranges that skip detection entirely, see src/engine.py
     whitelist: List[str] = field(default_factory=list)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)

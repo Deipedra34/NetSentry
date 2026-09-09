@@ -37,6 +37,29 @@ traffic_anomaly:
   multiplier: 3.0 # trigger when current window > multiplier * baseline average
   min_baseline_samples: 3 # minimum completed windows before alerting
 
+# DNS tunneling detection: DNS queries that look like they're smuggling data
+# (exfiltration or C2) inside the query name -- over-long or high-entropy
+# subdomain labels, an abnormally high query rate from one source IP, and/or
+# record types commonly abused for tunneling.
+dns_tunnel:
+  enabled: true
+  max_subdomain_length: 50 # flag a query whose longest subdomain label exceeds this
+  max_queries_per_minute: 60 # flag a source IP issuing more DNS queries than this in 60s
+  entropy_threshold: 3.5 # flag subdomains whose Shannon entropy (bits/char) exceeds this
+  suspicious_query_types: ["TXT", "NULL", "CNAME"] # record types weighted more heavily
+  cooldown: 60 # seconds to wait before re-alerting on the same source IP
+
+# Example dns_tunnel block tuned for a noisier network (CDNs and some SaaS
+# vendors legitimately use long, random-looking subdomains) -- raise the
+# thresholds so everyday traffic stops tripping it:
+# dns_tunnel:
+#   enabled: true
+#   max_subdomain_length: 72
+#   max_queries_per_minute: 150
+#   entropy_threshold: 4.0
+#   suspicious_query_types: ["TXT", "NULL"]
+#   cooldown: 120
+
 # IP whitelist: packets whose source IP matches an entry here skip detection
 # entirely. Entries can be exact IPs or CIDR ranges.
 # whitelist:

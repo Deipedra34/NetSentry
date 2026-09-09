@@ -11,6 +11,7 @@ import pytest
 
 scapy = pytest.importorskip("scapy.all")
 
+from scapy.layers.dns import DNS, DNSQR  # noqa: E402
 from scapy.layers.inet import IP, TCP, UDP  # noqa: E402
 from scapy.layers.l2 import ARP, Ether  # noqa: E402
 
@@ -41,6 +42,33 @@ def test_parse_udp_packet() -> None:
     assert info.protocol == "UDP"
     assert info.src_port == 53
     assert info.dst_port == 12345
+
+
+def test_parse_dns_query_extracts_name_and_type() -> None:
+    pkt = IP(
+        bytes(
+            IP(src="10.0.0.1", dst="8.8.8.8")
+            / UDP(sport=40000, dport=53)
+            / DNS(rd=1, qd=DNSQR(qname="data.tunnel.example.com", qtype="TXT"))
+        )
+    )
+    info = parse_packet(pkt)
+    assert info is not None
+    assert info.dns_qname == "data.tunnel.example.com"
+    assert info.dns_qtype == "TXT"
+
+
+def test_parse_dns_response_is_not_treated_as_query() -> None:
+    pkt = IP(
+        bytes(
+            IP(src="8.8.8.8", dst="10.0.0.1")
+            / UDP(sport=53, dport=40000)
+            / DNS(qr=1, qd=DNSQR(qname="example.com", qtype="A"))
+        )
+    )
+    info = parse_packet(pkt)
+    assert info is not None
+    assert info.dns_qname is None
 
 
 def test_parse_arp_reply() -> None:

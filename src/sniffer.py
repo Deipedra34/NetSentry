@@ -22,6 +22,7 @@ def parse_packet(packet: object) -> Optional[PacketInfo]:
     our PacketInfo format. Returns None if packet is empty/None -- shouldn't
     normally happen but better safe.
     """
+    from scapy.layers.dns import DNS, dnsqtypes
     from scapy.layers.inet import IP, TCP, UDP
     from scapy.layers.l2 import ARP, Ether
 
@@ -64,6 +65,21 @@ def parse_packet(packet: object) -> Optional[PacketInfo]:
             info.dst_port = int(udp.dport)
         else:
             info.protocol = "IP"
+
+        # Pull the queried name/type out of DNS *queries* (qr == 0) so the
+        # DNS tunnel detector can inspect them without re-parsing raw packets.
+        if DNS in packet:
+            dns = packet[DNS]
+            question = dns.qd
+            # dns.qd is a list on modern Scapy, a chained packet on older ones
+            if isinstance(question, list):
+                question = question[0] if question else None
+            if int(getattr(dns, "qr", 0) or 0) == 0 and question is not None:
+                qname = getattr(question, "qname", b"") or b""
+                if isinstance(qname, bytes):
+                    qname = qname.decode("utf-8", "replace")
+                info.dns_qname = qname.rstrip(".") or None
+                info.dns_qtype = dnsqtypes.get(int(question.qtype), str(question.qtype))
 
     return info
 
