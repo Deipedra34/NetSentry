@@ -15,6 +15,7 @@ it entirely, so nothing else in the codebase ends up depending on Scapy.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Optional
 
 
@@ -45,6 +46,15 @@ class PacketInfo:
     # dns_qtype the record type as a string (e.g. "A", "TXT", "CNAME").
     dns_qname: Optional[str] = None
     dns_qtype: Optional[str] = None
+    # TLS handshake fields, only set for packets carrying a parseable
+    # ClientHello or Certificate message -- see src/tls_parser.py and
+    # sniffer.py. tls_ja3 is the client's JA3 fingerprint (MD5 hex string);
+    # the tls_cert_* fields describe the server's leaf certificate.
+    tls_ja3: Optional[str] = None
+    tls_cert_subject: Optional[str] = None
+    tls_cert_issuer: Optional[str] = None
+    tls_cert_not_before: Optional[datetime] = None
+    tls_cert_not_after: Optional[datetime] = None
     length: int = 0
     # original Scapy packet object, if this PacketInfo came from a live
     # capture (sniffer.py sets it) -- None for hand-built test packets

@@ -60,6 +60,32 @@ dns_tunnel:
 #   suspicious_query_types: ["TXT", "NULL"]
 #   cooldown: 120
 
+# TLS/HTTPS anomaly detection: a client's JA3 fingerprint matching a
+# known-malicious blocklist, and/or a server certificate showing signs of
+# hastily-stood-up C2 infrastructure (self-signed, expired, short-lived, or
+# very recently issued). See README.md "TLS/HTTPS Anomaly Detection".
+tls_anomaly:
+  enabled: true
+  ja3_blocklist_path: "data/ja3_blocklist.txt" # user-supplied, see that file
+  flag_self_signed: true # flag certificates whose issuer == subject
+  flag_expired_certs: true # flag certificates expired or not yet valid
+  flag_short_validity_days: 7 # flag certificates valid for fewer than this many days
+  flag_recently_issued_days: 2 # flag certificates issued more recently than this
+  cooldown: 60 # seconds to wait before re-alerting on the same source IP
+
+# Example tls_anomaly block for a network where short-lived certs are
+# routine (e.g. ACME/Let's Encrypt-heavy environments issuing 90-day certs
+# but rotating often) -- only care about JA3 blocklist hits and outright
+# self-signed/expired certs, skip the more heuristic timing checks:
+# tls_anomaly:
+#   enabled: true
+#   ja3_blocklist_path: "data/ja3_blocklist.txt"
+#   flag_self_signed: true
+#   flag_expired_certs: true
+#   flag_short_validity_days: 1
+#   flag_recently_issued_days: 0
+#   cooldown: 60
+
 # IP whitelist: packets whose source IP matches an entry here skip detection
 # entirely. Entries can be exact IPs or CIDR ranges.
 # whitelist:

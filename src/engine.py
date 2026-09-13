@@ -20,6 +20,7 @@ from src.detectors import (
     DNSTunnelDetector,
     DosDetector,
     PortScanDetector,
+    TLSAnomalyDetector,
     TrafficAnomalyDetector,
 )
 from src.notifications import NotificationDispatcher
@@ -29,7 +30,14 @@ from src.pcap_export import PcapExporter
 logger = logging.getLogger("netsentry.engine")
 
 # names the CLI --detectors flag and config.yaml both use to refer to detectors
-DETECTOR_NAMES = ("port_scan", "arp_spoof", "dos", "traffic_anomaly", "dns_tunnel")
+DETECTOR_NAMES = (
+    "port_scan",
+    "arp_spoof",
+    "dos",
+    "traffic_anomaly",
+    "dns_tunnel",
+    "tls_anomaly",
+)
 
 
 def build_detectors(config: Config, enabled: List[str] | None = None) -> List[Detector]:
@@ -92,6 +100,17 @@ def build_detectors(config: Config, enabled: List[str] | None = None) -> List[De
                 entropy_threshold=config.dns_tunnel.entropy_threshold,
                 suspicious_query_types=config.dns_tunnel.suspicious_query_types,
                 cooldown=config.dns_tunnel.cooldown,
+            )
+        )
+    if wants("tls_anomaly", config.tls_anomaly.enabled):
+        detectors.append(
+            TLSAnomalyDetector(
+                ja3_blocklist_path=config.tls_anomaly.ja3_blocklist_path,
+                flag_self_signed=config.tls_anomaly.flag_self_signed,
+                flag_expired_certs=config.tls_anomaly.flag_expired_certs,
+                flag_short_validity_days=config.tls_anomaly.flag_short_validity_days,
+                flag_recently_issued_days=config.tls_anomaly.flag_recently_issued_days,
+                cooldown=config.tls_anomaly.cooldown,
             )
         )
 

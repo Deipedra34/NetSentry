@@ -21,7 +21,7 @@ database, and surfaces them on a self-refreshing Flask dashboard.
 
 ## Features
 
-NetSentry ships with five independent detectors, each individually
+NetSentry ships with six independent detectors, each individually
 configurable and individually toggleable:
 
 | Detector | What it catches | Signal |
@@ -31,6 +31,7 @@ configurable and individually toggleable:
 | **SYN Flood / Basic DoS** | Volumetric TCP SYN flood | ≥ *N* SYN packets from one source IP within *T* seconds |
 | **Traffic Anomaly** | General statistical spikes in traffic volume | Packets-per-window exceeding *X*× the rolling baseline average |
 | **DNS Tunneling** | Data exfiltration / C2 hidden inside DNS queries | Long or high-entropy subdomains, an excessive per-IP query rate, and/or tunneling-friendly record types (TXT/NULL/CNAME) |
+| **TLS/HTTPS Anomaly** | Malware/C2 traffic hidden inside TLS handshakes | A client JA3 fingerprint on a known-malicious blocklist, and/or a server certificate that's self-signed, expired, short-lived, or very recently issued |
 
 Every detected event is persisted with a timestamp, source IP, event type,
 and a human-readable details string, and is immediately visible on the live
@@ -54,6 +55,7 @@ flowchart LR
         DOS["DosDetector"]
         ANOM["TrafficAnomalyDetector"]
         DNS["DNSTunnelDetector"]
+        TLS["TLSAnomalyDetector"]
     end
 
     Engine --> PS
@@ -61,12 +63,14 @@ flowchart LR
     Engine --> DOS
     Engine --> ANOM
     Engine --> DNS
+    Engine --> TLS
 
     PS -->|"Event"| DB[("SQLite\nnetsentry.db")]
     ARP -->|"Event"| DB
     DOS -->|"Event"| DB
     ANOM -->|"Event"| DB
     DNS -->|"Event"| DB
+    TLS -->|"Event"| DB
 
     DB --> Web["Flask dashboard\n(web.py)"]
     Web -->|"HTTP :5000"| Browser["Browser\n(auto-refreshing table)"]
@@ -83,7 +87,10 @@ Design notes:
   (`src/packet_info.py`).
 - Detectors never see Scapy objects — they only consume `PacketInfo`, which
   makes them trivial to unit test with plain Python objects (no capture
-  privileges needed to run the test suite).
+  privileges needed to run the test suite). TLS fields work the same way DNS
+  fields do: `src/tls_parser.py` extracts JA3 fingerprints and certificate
+  info from raw TCP payloads, `sniffer.py` attaches the results to
+  `PacketInfo`, and `TLSAnomalyDetector` only ever sees the parsed fields.
 - The `DetectionEngine` (`src/engine.py`) fans each packet out to every
   active detector, persists any resulting `Event` objects to SQLite via
   `src/database.py`, and logs them.
@@ -108,12 +115,15 @@ netsentry/
 │   ├── engine.py                 # Wires detectors + database together
 │   ├── database.py               # SQLite event storage
 │   ├── logging_config.py         # Console + rotating file logging
-│   ├── detectors.py              # Detector interface + all five detectors
+│   ├── detectors.py              # Detector interface + all six detectors
+│   ├── tls_parser.py             # Minimal TLS handshake parsing (JA3 + certs)
 │   ├── notifications.py          # Discord / Telegram / email alert dispatch
 │   ├── pcap_export.py            # Auto .pcap export of critical-event traffic
 │   ├── web.py                    # Flask app, JSON API, self-signed TLS setup
 │   └── templates/
 │       └── dashboard.html
+├── data/
+│   └── ja3_blocklist.txt         # User-supplied JA3 threat intel (empty by default)
 └── tests/
     ├── conftest.py                # Shared fixtures / mock packet builder
     ├── test_port_scan.py
@@ -121,6 +131,7 @@ netsentry/
     ├── test_dos_detect.py
     ├── test_traffic_anomaly.py
     ├── test_dns_tunnel.py
+    ├── test_tls_anomaly.py
     ├── test_database.py
     ├── test_config.py
     ├── test_sniffer.py
@@ -266,7 +277,8 @@ version control.
 sudo python main.py -i eth0 --detectors port_scan,dos
 ```
 
-Valid detector names: `port_scan`, `arp_spoof`, `dos`, `traffic_anomaly`.
+Valid detector names: `port_scan`, `arp_spoof`, `dos`, `traffic_anomaly`,
+`dns_tunnel`, `tls_anomaly`.
 
 ### Browse an existing database without capturing
 
@@ -352,6 +364,15 @@ dns_tunnel:
   suspicious_query_types: ["TXT", "NULL", "CNAME"]
   cooldown: 60
 
+tls_anomaly:
+  enabled: true
+  ja3_blocklist_path: "data/ja3_blocklist.txt"
+  flag_self_signed: true
+  flag_expired_certs: true
+  flag_short_validity_days: 7
+  flag_recently_issued_days: 2
+  cooldown: 60
+
 web:
   host: 127.0.0.1
   port: 5000
@@ -381,9 +402,9 @@ A debug-level log line is emitted each time a packet is skipped this way.
 ## Notifications
 
 NetSentry can push critical alerts (SYN flood, ARP spoofing, traffic
-anomalies, port scans, and DNS tunneling) out to Discord, Telegram, and/or
-email as they happen, in addition to logging them and writing them to the
-dashboard. All
+anomalies, port scans, DNS tunneling, and TLS anomalies) out to Discord,
+Telegram, and/or email as they happen, in addition to logging them and
+writing them to the dashboard. All
 three channels are independently configurable under `notifications` in
 `config.yaml` and default to disabled — see the commented examples already
 in the shipped `config.yaml`. Each channel fails independently (a bad
@@ -437,9 +458,9 @@ notifications:
 ## PCAP Export
 
 NetSentry can automatically save the raw traffic around a critical event
-(SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling) to a `.pcap` file,
-so you have the actual packets to dig into later instead of just the
-one-line alert. It's configured under `pcap_export` in `config.yaml` and
+(SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling, TLS
+anomalies) to a `.pcap` file, so you have the actual packets to dig into
+later instead of just the one-line alert. It's configured under `pcap_export` in `config.yaml` and
 disabled by default — see the commented example already in the shipped
 `config.yaml`.
 
@@ -486,9 +507,9 @@ the default `.pcap` handler), or from the command line with `tcpdump -r` /
 > care about.
 
 NetSentry can automatically block the source IP behind a critical event
-(SYN flood, ARP spoofing, traffic anomalies, port scans, or DNS tunneling,
-same as notifications/PCAP export) at the OS firewall level, via `AutoBlocker` in
-`src/auto_block.py`. It's configured under `auto_block` in `config.yaml` and
+(SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling, or
+TLS anomalies, same as notifications/PCAP export) at the OS firewall level,
+via `AutoBlocker` in `src/auto_block.py`. It's configured under `auto_block` in `config.yaml` and
 disabled by default — see the commented example already in the shipped
 `config.yaml`.
 
@@ -497,8 +518,8 @@ disabled by default — see the commented example already in the shipped
 1. `auto_block.enabled` must be `true`.
 2. The event's type must meet or exceed `auto_block.min_severity`
    (`low` / `medium` / `high` / `critical` — port scans are `low`, traffic
-   anomalies `medium`, ARP spoofing and DNS tunneling `high`, SYN floods
-   `critical`).
+   anomalies `medium`, ARP spoofing, DNS tunneling, and TLS anomalies
+   `high`, SYN floods `critical`).
 3. The source IP must **not** be on the `whitelist` — this is a hard rule,
    checked independently of any config, never overridden.
 4. The source IP must **not** be a private/local address (loopback,
@@ -613,6 +634,61 @@ loosening the thresholds for everyone.
 
 ---
 
+## TLS/HTTPS Anomaly Detection
+
+Not every threat rides in on plaintext protocols — plenty of malware and C2
+frameworks tunnel their traffic over TLS specifically because it blends in
+with normal HTTPS. `TLSAnomalyDetector` (`src/detectors.py`) looks past the
+encryption at what's still visible in the handshake itself: the client's
+fingerprint and the server's certificate.
+
+**JA3 fingerprinting.** [JA3](https://github.com/salesforce/ja3) hashes a
+TLS client's ClientHello — its TLS version, cipher list, extensions,
+elliptic curves, and elliptic curve point formats — into a single MD5
+digest. That digest is stable for a given TLS library/config regardless of
+which server it's talking to, so malware that reuses the same TLS stack
+across infections produces the same JA3 hash every time — a solid IOC even
+when the destination domain or IP changes daily. NetSentry computes the JA3
+hash for every ClientHello it sees (`src/tls_parser.py`) and checks it
+against a local blocklist file.
+
+**Certificate checks.** Independently of JA3, every server certificate
+NetSentry observes is checked for signs of hastily-stood-up infrastructure:
+
+| Flag | Default | What it checks | Why it matters |
+|---|---|---|---|
+| `flag_self_signed` | `true` | Certificate issuer equals its subject | Legitimate public-facing services use a CA-issued cert; a self-signed one is cheap and instant to generate, which is exactly what a C2 server stood up in a hurry tends to use. |
+| `flag_expired_certs` | `true` | Certificate is expired, or not yet valid | A currently-invalid certificate on a live connection means either broken infrastructure or something that was never meant to hold up to scrutiny — neither is a good sign. |
+| `flag_short_validity_days` | `7` | Certificate's total validity period is shorter than this many days | Long-lived legitimate services get certs valid for months; malware operators generating disposable certs on the fly often mint them for just days, which shows up as an unusually short validity window. |
+| `flag_recently_issued_days` | `2` | Certificate was issued more recently than this many days ago | C2 infrastructure is frequently stood up (and its cert generated) right before it's used, so a brand-new cert on a connection you're seeing for the first time is a meaningful correlation, even if each fact alone is weak. |
+
+Any condition that fires — a blocklisted JA3 hash, or one or more
+certificate flags — raises a `TLS_ANOMALY` event whose `details` spell out
+exactly which condition(s) tripped. Like every other detector, it flows
+through notifications, PCAP export, the whitelist, and auto-block, and
+applies a per-source-IP `cooldown` so a sustained session doesn't produce an
+alert per packet.
+
+**Sourcing a JA3 blocklist.** NetSentry does **not** ship with a real list
+of known-malicious JA3 hashes — threat intel like this goes stale quickly
+and needs to come from a source you actively maintain. `data/ja3_blocklist.txt`
+ships with only a placeholder line showing the expected format (one
+lowercase MD5 hash per line, `#` for comments). A good place to start
+building a real one is the
+[Abuse.ch SSL Blacklist](https://sslbl.abuse.ch/), which publishes JA3
+fingerprints tied to known malware/botnet C2 infrastructure; most other
+threat intel platforms and MISP feeds that track JA3 indicators can be
+exported into the same one-hash-per-line format. Point
+`tls_anomaly.ja3_blocklist_path` at wherever you keep it (loaded once at
+startup — restart NetSentry after updating the file).
+
+Thresholds live under `tls_anomaly` in `config.yaml` — see the commented
+example already in the shipped file for a looser tuning suited to
+short-lived-cert-heavy environments (e.g. frequent ACME/Let's Encrypt
+rotation).
+
+---
+
 ## Testing
 
 The full test suite runs entirely offline against synthetic packet data —
@@ -635,7 +711,7 @@ touching a network interface.
 
 ## How each detector works
 
-All five live in `src/detectors.py`:
+All six live in `src/detectors.py`:
 
 - **Port Scan** (`PortScanDetector`): maintains a per-source-IP map of
   `{port: last_seen_timestamp}`, prunes entries older than the configured
@@ -657,6 +733,12 @@ All five live in `src/detectors.py`:
   combines those into a score and alerts once it crosses the trigger
   threshold, naming the signals that fired. See
   [DNS Tunneling Detection](#dns-tunneling-detection) for tuning.
+- **TLS/HTTPS Anomaly** (`TLSAnomalyDetector`): checks a ClientHello's JA3
+  fingerprint against a local blocklist, and a server certificate's
+  issuer/subject/validity against four independent red flags (self-signed,
+  expired, short-lived, recently issued); alerts if any condition fires,
+  naming which one(s). See
+  [TLS/HTTPS Anomaly Detection](#tlshttps-anomaly-detection) for tuning.
 
 All detectors implement per-source cooldowns so a sustained attack produces
 one alert per cooldown period rather than one per packet.

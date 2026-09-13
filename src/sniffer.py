@@ -12,6 +12,7 @@ import threading
 import time
 from typing import Callable, List, Optional
 
+from src import tls_parser
 from src.packet_info import PacketInfo
 
 logger = logging.getLogger("netsentry.sniffer")
@@ -58,6 +59,19 @@ def parse_packet(packet: object) -> Optional[PacketInfo]:
             info.src_port = int(tcp.sport)
             info.dst_port = int(tcp.dport)
             info.tcp_flags = str(tcp.flags)
+
+            # Cheap pre-check (TLS record content type is always the first
+            # byte) so plain TCP traffic doesn't pay for handshake parsing.
+            payload = bytes(tcp.payload)
+            if payload[:1] == b"\x16":
+                info.tls_ja3 = tls_parser.parse_client_hello(payload)
+                if info.tls_ja3 is None:
+                    cert_info = tls_parser.parse_certificate(payload)
+                    if cert_info is not None:
+                        info.tls_cert_subject = cert_info.subject
+                        info.tls_cert_issuer = cert_info.issuer
+                        info.tls_cert_not_before = cert_info.not_before
+                        info.tls_cert_not_after = cert_info.not_after
         elif UDP in packet:
             udp = packet[UDP]
             info.protocol = "UDP"

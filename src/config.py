@@ -80,6 +80,31 @@ class DnsTunnelConfig:
 
 
 @dataclass
+class TlsAnomalyConfig:
+    """Thresholds for TLS/HTTPS anomaly detection -- see src/detectors.py.
+
+    Flags TLS handshakes on two independent fronts: a client's JA3
+    fingerprint matching a known-malicious blocklist, and a server
+    certificate showing signs of hastily-stood-up C2 infrastructure
+    (self-signed, expired, short-lived, or very recently issued).
+    """
+
+    enabled: bool = True
+    # path to a local file of known-malicious JA3 hashes, one per line
+    ja3_blocklist_path: str = "data/ja3_blocklist.txt"
+    # flag certificates whose issuer and subject are identical
+    flag_self_signed: bool = True
+    # flag certificates that are expired or not yet valid
+    flag_expired_certs: bool = True
+    # flag certificates valid for fewer than this many days
+    flag_short_validity_days: int = 7
+    # flag certificates issued more recently than this many days ago
+    flag_recently_issued_days: int = 2
+    # seconds to wait before re-alerting on the same source IP
+    cooldown: float = 60.0
+
+
+@dataclass
 class DatabaseConfig:
     """SQLite event database settings."""
 
@@ -198,6 +223,7 @@ class Config:
     dos: DosConfig = field(default_factory=DosConfig)
     traffic_anomaly: TrafficAnomalyConfig = field(default_factory=TrafficAnomalyConfig)
     dns_tunnel: DnsTunnelConfig = field(default_factory=DnsTunnelConfig)
+    tls_anomaly: TlsAnomalyConfig = field(default_factory=TlsAnomalyConfig)
     # source IPs/CIDR ranges that skip detection entirely, see src/engine.py
     whitelist: List[str] = field(default_factory=list)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)

@@ -9,14 +9,18 @@ with just made-up packets instead of a real capture.
 
 from __future__ import annotations
 
+import logging
 import math
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict, deque
-from typing import Deque, Dict, List, Optional
+from pathlib import Path
+from typing import Deque, Dict, FrozenSet, List, Optional
 
 from src.database import Event
 from src.packet_info import PacketInfo
 from src.utils import to_datetime
+
+logger = logging.getLogger("netsentry.detectors")
 
 __all__ = [
     "Detector",
@@ -25,6 +29,7 @@ __all__ = [
     "DosDetector",
     "TrafficAnomalyDetector",
     "DNSTunnelDetector",
+    "TLSAnomalyDetector",
 ]
 
 
@@ -465,3 +470,147 @@ class DNSTunnelDetector(Detector):
                 timestamp=to_datetime(now),
             )
         ]
+
+
+def _load_ja3_blocklist(path: str) -> FrozenSet[str]:
+    """Reads a plain-text JA3 blocklist: one hash per line, blank lines and
+    `#`-prefixed comments ignored. Hashes are lowercased so lookups are
+    case-insensitive. A missing file just means an empty blocklist -- it's
+    the shipped default path and most installs won't have populated it yet
+    (see data/ja3_blocklist.txt), so this logs a warning rather than raising.
+    """
+    file_path = Path(path)
+    if not file_path.exists():
+        logger.warning(
+            "JA3 blocklist file %s not found; TLSAnomalyDetector will not "
+            "flag any JA3 hashes until one is supplied",
+            file_path,
+        )
+        return frozenset()
+
+    hashes = set()
+    for line in file_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        hashes.add(line.lower())
+    return frozenset(hashes)
+
+
+class TLSAnomalyDetector(Detector):
+    """Flags malicious-looking TLS handshakes: known-bad JA3 client
+    fingerprints, and server certificates with C2-style red flags.
+
+    JA3 (https://github.com/salesforce/ja3) fingerprints a TLS client by
+    hashing its ClientHello -- SSL/TLS version, cipher list, extensions,
+    elliptic curves, and elliptic curve point formats -- into a single MD5
+    digest that's stable per TLS library/config, regardless of destination.
+    Malware families and C2 frameworks tend to reuse the same TLS stack
+    across infections, so a known-bad JA3 hash is a strong signal even when
+    the destination IP/domain is brand new.
+
+    Certificates get checked independently for signs of hastily-stood-up
+    infrastructure: self-signed, expired/not-yet-valid, unusually
+    short-lived, or very recently issued certs are all common on C2 servers,
+    which don't tend to bother with (or can't get) a long-lived cert from a
+    real CA the way a legitimate long-running service would.
+
+    JA3 hashes and certificate fields are extracted upstream in
+    src/sniffer.py (the actual TLS parsing lives in src/tls_parser.py) --
+    this detector only deals with the already-parsed PacketInfo fields,
+    mirroring how DNSTunnelDetector only looks at dns_qname/dns_qtype rather
+    than parsing DNS packets itself.
+    """
+
+    name = "TLS_ANOMALY"
+
+    def __init__(
+        self,
+        ja3_blocklist_path: str = "data/ja3_blocklist.txt",
+        flag_self_signed: bool = True,
+        flag_expired_certs: bool = True,
+        flag_short_validity_days: int = 7,
+        flag_recently_issued_days: int = 2,
+        cooldown: float = 60.0,
+    ) -> None:
+        self.flag_self_signed = flag_self_signed
+        self.flag_expired_certs = flag_expired_certs
+        self.flag_short_validity_days = flag_short_validity_days
+        self.flag_recently_issued_days = flag_recently_issued_days
+        self.cooldown = cooldown
+        # loaded once at construction -- see src/config.py, no config-reload
+        # mechanism exists anywhere else in NetSentry either
+        self._ja3_blocklist = _load_ja3_blocklist(ja3_blocklist_path)
+        self._last_alert: Dict[str, float] = {}
+
+    def process_packet(self, packet: PacketInfo) -> List[Event]:
+        """Checks a JA3-carrying packet (ClientHello) against the blocklist,
+        or a certificate-carrying packet (Certificate message) against the
+        four cert red flags -- whichever this particular packet has."""
+        if packet.tls_ja3:
+            event = self._check_ja3(packet)
+            if event is not None:
+                return [event]
+        if packet.tls_cert_subject is not None:
+            event = self._check_certificate(packet)
+            if event is not None:
+                return [event]
+        return []
+
+    def _on_cooldown(self, src_ip: str, now: float) -> bool:
+        last_alert = self._last_alert.get(src_ip, float("-inf"))
+        return now - last_alert < self.cooldown
+
+    def _check_ja3(self, packet: PacketInfo) -> Optional[Event]:
+        if not packet.src_ip or packet.tls_ja3.lower() not in self._ja3_blocklist:
+            return None
+        if self._on_cooldown(packet.src_ip, packet.timestamp):
+            return None
+
+        self._last_alert[packet.src_ip] = packet.timestamp
+        details = f"JA3 fingerprint {packet.tls_ja3} matches known-malicious blocklist"
+        return Event(
+            event_type=self.name,
+            source_ip=packet.src_ip,
+            details=details,
+            timestamp=to_datetime(packet.timestamp),
+        )
+
+    def _check_certificate(self, packet: PacketInfo) -> Optional[Event]:
+        signals: List[str] = []
+        now = to_datetime(packet.timestamp)
+
+        if self.flag_self_signed and packet.tls_cert_issuer == packet.tls_cert_subject:
+            signals.append(f"self-signed certificate (subject: {packet.tls_cert_subject})")
+
+        not_before = packet.tls_cert_not_before
+        not_after = packet.tls_cert_not_after
+        if self.flag_expired_certs and not_after is not None and not_after < now:
+            signals.append(f"certificate expired (notAfter: {not_after.isoformat()})")
+        if self.flag_expired_certs and not_before is not None and not_before > now:
+            signals.append(f"certificate not yet valid (notBefore: {not_before.isoformat()})")
+
+        if not_before is not None and not_after is not None:
+            validity_days = (not_after - not_before).total_seconds() / 86400
+            if validity_days < self.flag_short_validity_days:
+                signals.append(
+                    f"unusually short validity period ({validity_days:.1f} days)"
+                )
+
+            issued_days_ago = (now - not_before).total_seconds() / 86400
+            if 0 <= issued_days_ago < self.flag_recently_issued_days:
+                signals.append(f"recently issued ({issued_days_ago:.1f} days ago)")
+
+        if not signals or not packet.src_ip:
+            return None
+        if self._on_cooldown(packet.src_ip, packet.timestamp):
+            return None
+
+        self._last_alert[packet.src_ip] = packet.timestamp
+        details = "Suspicious TLS certificate -- " + "; ".join(signals)
+        return Event(
+            event_type=self.name,
+            source_ip=packet.src_ip,
+            details=details,
+            timestamp=now,
+        )

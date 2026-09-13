@@ -1,0 +1,23 @@
+# NetSentry JA3 blocklist
+#
+# One JA3 MD5 hash per line (lowercase hex, 32 characters). Blank lines and
+# lines starting with "#" are ignored. Loaded once at startup by
+# TLSAnomalyDetector (src/detectors.py) from the path configured under
+# tls_anomaly.ja3_blocklist_path in config.yaml.
+#
+# NetSentry does NOT ship with a real list of known-malicious JA3 hashes --
+# threat intel like this goes stale quickly and needs to come from a source
+# you trust and keep updated yourself. A well-known community-maintained
+# source to start from:
+#
+#   - Abuse.ch SSL Blacklist (JA3 fingerprints tied to known malware/botnet
+#     C2 infrastructure, exportable as CSV): https://sslbl.abuse.ch/
+#
+# Most threat intel platforms and MISP feeds that publish JA3 indicators can
+# be exported or reformatted into this same one-hash-per-line format.
+#
+# The line below is a placeholder, NOT a real malicious fingerprint -- it
+# exists only to show the expected format and to make it easy to verify
+# TLSAnomalyDetector is wired up correctly. Delete it once you've loaded a
+# real list.
+0000000000000000000000000000aa

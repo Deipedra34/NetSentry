@@ -25,9 +25,17 @@ logger = logging.getLogger("netsentry.notifications")
 # Event types severe enough to page someone. SYN floods and ARP spoofing are
 # inherently critical, traffic anomalies flag volumetric spikes, port scans
 # are included too since Event doesn't carry a severity/priority field to
-# distinguish "probing" from "worse", and DNS tunneling points at active
-# exfiltration / C2.
-CRITICAL_EVENT_TYPES = {"SYN_FLOOD", "ARP_SPOOF", "TRAFFIC_ANOMALY", "PORT_SCAN", "DNS_TUNNEL"}
+# distinguish "probing" from "worse", DNS tunneling points at active
+# exfiltration / C2, and TLS anomalies (blocklisted JA3 fingerprints,
+# suspicious certificates) point at the same thing over HTTPS.
+CRITICAL_EVENT_TYPES = {
+    "SYN_FLOOD",
+    "ARP_SPOOF",
+    "TRAFFIC_ANOMALY",
+    "PORT_SCAN",
+    "DNS_TUNNEL",
+    "TLS_ANOMALY",
+}
 
 # Relative ranking within CRITICAL_EVENT_TYPES, low to high -- formalizes the
 # informal ordering described above. Used by AutoBlocker's min_severity gate
@@ -39,6 +47,7 @@ EVENT_SEVERITY: Dict[str, str] = {
     "TRAFFIC_ANOMALY": "medium",
     "ARP_SPOOF": "high",
     "DNS_TUNNEL": "high",
+    "TLS_ANOMALY": "high",
     "SYN_FLOOD": "critical",
 }
 
