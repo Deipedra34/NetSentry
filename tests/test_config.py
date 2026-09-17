@@ -64,3 +64,25 @@ def test_shipped_config_yaml_loads() -> None:
     config = load_config(repo_root / "config.yaml")
     assert config.port_scan.enabled is True
     assert config.traffic_anomaly.multiplier == 3.0
+
+
+def test_interfaces_default_is_empty_list() -> None:
+    config = load_config(None)
+    assert config.interfaces == []
+
+
+def test_single_interface_string_is_normalized_to_list(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("interfaces: eth0\n", encoding="utf-8")
+    config = load_config(config_file)
+    assert config.interfaces == ["eth0"]
+
+
+def test_interface_list_is_passed_through(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "interfaces:\n  - eth0\n  - wlan0\n",
+        encoding="utf-8",
+    )
+    config = load_config(config_file)
+    assert config.interfaces == ["eth0", "wlan0"]

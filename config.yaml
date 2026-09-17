@@ -6,6 +6,16 @@
 # contain the keys you want to override.
 ##############################################################################
 
+# Network interface(s) to capture on. Accepts a single interface name, or a
+# list to capture on multiple interfaces simultaneously (e.g. a wired +
+# wireless interface, or several VLAN sub-interfaces, all at once). Leave
+# unset/empty to let Scapy pick the OS default. The CLI's -i/--interface
+# flag (main.py) overrides this when given.
+# interfaces: eth0
+# interfaces:
+#   - eth0
+#   - wlan0
+
 # Port scan detection: a single source IP contacting many distinct
 # destination ports within a short time window.
 port_scan:

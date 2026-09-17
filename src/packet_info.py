@@ -59,6 +59,10 @@ class PacketInfo:
     # original Scapy packet object, if this PacketInfo came from a live
     # capture (sniffer.py sets it) -- None for hand-built test packets
     raw_packet: Optional[Any] = None
+    # name of the interface this packet was captured on, when known (set by
+    # sniffer.py when capturing on multiple interfaces at once). Purely
+    # informational for logging/debugging -- detectors don't depend on it.
+    interface: Optional[str] = None
 
     @property
     def is_syn(self) -> bool:

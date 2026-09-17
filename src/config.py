@@ -218,6 +218,13 @@ class WebConfig:
 class Config:
     """Top-level NetSentry configuration."""
 
+    # network interface(s) to capture on. config.yaml may specify a single
+    # name (str) or a list of names -- a string is normalized into a
+    # one-item list by _normalize_interfaces() below, so everything past
+    # load_config() only ever deals with a list. Empty means "let Scapy pick
+    # the OS default". The CLI's -i/--interface flag (main.py) takes
+    # precedence over this when given.
+    interfaces: List[str] = field(default_factory=list)
     port_scan: PortScanConfig = field(default_factory=PortScanConfig)
     arp_spoof: ArpSpoofConfig = field(default_factory=ArpSpoofConfig)
     dos: DosConfig = field(default_factory=DosConfig)
@@ -254,6 +261,14 @@ def _merge_dataclass(instance: Any, overrides: Dict[str, Any]) -> Any:
     return instance
 
 
+def _normalize_interfaces(config: Config) -> None:
+    """The one place a single `interfaces: eth0` string gets turned into a
+    one-item list -- every other consumer (sniffer.py, main.py) only ever
+    has to deal with `config.interfaces` as a list."""
+    if isinstance(config.interfaces, str):
+        config.interfaces = [config.interfaces]
+
+
 def load_config(path: str | Path | None) -> Config:
     """Loads config from the yaml file at `path`, defaults for anything
     that's missing. If path is None or just doesn't exist we don't error out,
@@ -262,17 +277,16 @@ def load_config(path: str | Path | None) -> Config:
     mapping (e.g. someone put a list at the top level, whatever).
     """
     config = Config()
-    if path is None:
-        return config
+    if path is not None:
+        file_path = Path(path)
+        if file_path.exists():
+            with file_path.open("r", encoding="utf-8") as handle:
+                raw = yaml.safe_load(handle) or {}
 
-    file_path = Path(path)
-    if not file_path.exists():
-        return config
+            if not isinstance(raw, dict):
+                raise ValueError(f"Configuration file {file_path} must contain a YAML mapping")
 
-    with file_path.open("r", encoding="utf-8") as handle:
-        raw = yaml.safe_load(handle) or {}
+            config = _merge_dataclass(config, copy.deepcopy(raw))
 
-    if not isinstance(raw, dict):
-        raise ValueError(f"Configuration file {file_path} must contain a YAML mapping")
-
-    return _merge_dataclass(config, copy.deepcopy(raw))
+    _normalize_interfaces(config)
+    return config

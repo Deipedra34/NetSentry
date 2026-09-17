@@ -238,6 +238,21 @@ sudo python main.py -i eth0
 python main.py -i "Ethernet"
 ```
 
+### Capture on multiple interfaces at once
+
+Pass more than one name to `-i`/`--interface` to capture on several
+interfaces simultaneously -- useful for monitoring both a wired and wireless
+interface, or several VLAN sub-interfaces, at once. Every interface feeds
+the same detectors and the same dashboard; nothing else changes.
+
+```bash
+sudo python main.py -i eth0 wlan0
+```
+
+This can also be set in `config.yaml` instead of (or as a default for) the
+CLI flag -- see [Configuration](#configuration) below. The CLI flag, when
+given, always takes precedence over `config.yaml`'s `interfaces`.
+
 ### Capture + live dashboard together
 
 ```bash
@@ -299,7 +314,7 @@ python main.py --help
 ```
 
 ```
--i, --interface       Network interface to capture on
+-i, --interface       Network interface(s) to capture on (space-separated for multiple)
 -c, --config          Path to YAML config file (default: config.yaml)
 --detectors            Comma-separated detector names to enable
 --bpf-filter            BPF filter for capture (default: "ip or arp")
@@ -337,6 +352,14 @@ All thresholds live in `config.yaml`. Any key you omit falls back to the
 built-in default — see `src/config.py` for the full set. Example:
 
 ```yaml
+# Single interface (backward-compatible form):
+interfaces: eth0
+
+# Or capture on several at once (e.g. wired + wireless, or multiple VLANs):
+# interfaces:
+#   - eth0
+#   - wlan0
+
 port_scan:
   enabled: true
   port_threshold: 15   # distinct ports within the window to trigger

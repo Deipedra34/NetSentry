@@ -110,3 +110,75 @@ def test_on_packet_swallows_handler_exceptions() -> None:
 
     # Must not raise -- a broken handler shouldn't kill packet capture.
     sniffer._on_packet(pkt)
+
+
+def test_on_packet_tags_packetinfo_with_interface() -> None:
+    received = []
+    sniffer = NetworkSniffer(interface=None, packet_handler=received.append)
+    pkt = Ether() / IP(src="10.0.0.5", dst="10.0.0.6") / TCP(sport=1, dport=2, flags="S")
+
+    sniffer._on_packet(pkt, interface="eth0")
+
+    assert len(received) == 1
+    assert received[0].interface == "eth0"
+
+
+class TestInterfaceNormalization:
+    """A single string is normalized into a one-item list, same as
+    config.py does for config.yaml -- see src/config.py::_normalize_interfaces."""
+
+    def test_single_string_is_normalized_to_list(self) -> None:
+        sniffer = NetworkSniffer(interface="eth0", packet_handler=lambda _info: None)
+        assert sniffer.interfaces == ["eth0"]
+
+    def test_list_is_passed_through(self) -> None:
+        sniffer = NetworkSniffer(interface=["eth0", "wlan0"], packet_handler=lambda _info: None)
+        assert sniffer.interfaces == ["eth0", "wlan0"]
+
+    def test_none_normalizes_to_empty_list(self) -> None:
+        sniffer = NetworkSniffer(interface=None, packet_handler=lambda _info: None)
+        assert sniffer.interfaces == []
+
+
+class TestMultiInterfaceStart:
+    """start() runs one capture thread per interface; a bad interface logs
+    a warning and the rest keep going, and it's only fatal if every
+    interface fails. The real scapy sniff() blocks forever on success, so
+    these tests fake it out entirely -- no real interfaces or privileges
+    needed."""
+
+    def test_one_bad_interface_does_not_block_the_others(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fake_sniff(iface=None, prn=None, filter=None, store=False, stop_filter=None):  # noqa: ANN001
+            if iface == "bad0":
+                raise OSError("No such device")
+            return None
+
+        monkeypatch.setattr(scapy, "sniff", fake_sniff)
+
+        sniffer = NetworkSniffer(interface=["good0", "bad0"], packet_handler=lambda _info: None)
+        sniffer.start()  # must not raise -- good0 succeeded
+
+        assert "bad0" in sniffer._failures
+        assert "good0" not in sniffer._failures
+
+    def test_all_interfaces_failing_is_fatal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fake_sniff(iface=None, prn=None, filter=None, store=False, stop_filter=None):  # noqa: ANN001
+            raise OSError(f"No such device: {iface}")
+
+        monkeypatch.setattr(scapy, "sniff", fake_sniff)
+
+        sniffer = NetworkSniffer(interface=["bad0", "bad1"], packet_handler=lambda _info: None)
+        with pytest.raises(RuntimeError):
+            sniffer.start()
+
+    def test_all_interfaces_failing_with_permission_error_raises_permission_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_sniff(iface=None, prn=None, filter=None, store=False, stop_filter=None):  # noqa: ANN001
+            raise PermissionError("Operation not permitted")
+
+        monkeypatch.setattr(scapy, "sniff", fake_sniff)
+
+        sniffer = NetworkSniffer(interface="bad0", packet_handler=lambda _info: None)
+        with pytest.raises(PermissionError):
+            sniffer.start()

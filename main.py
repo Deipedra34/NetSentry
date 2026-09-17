@@ -9,6 +9,9 @@ Some examples (from the project root):
     Capture on eth0 with all detectors + the web dashboard on:
         sudo python main.py -i eth0 --web
 
+    Capture on multiple interfaces at once (e.g. wired + wireless):
+        sudo python main.py -i eth0 wlan0 --web
+
     Only care about port scans and SYN floods:
         sudo python main.py -i eth0 --detectors port_scan,dos
 
@@ -46,7 +49,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "-i", "--interface",
-        help="Network interface to capture on (see --list-interfaces).",
+        nargs="+",
+        metavar="IFACE",
+        help=(
+            "Network interface(s) to capture on (see --list-interfaces). "
+            "Accepts more than one to capture on several at once, e.g. "
+            "'-i eth0 wlan0'. Overrides config.yaml's 'interfaces' when given."
+        ),
         default=None,
     )
     parser.add_argument(
@@ -233,8 +242,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.web:
         run_web_dashboard(database, config, blocking=False)
 
+    interfaces = args.interface if args.interface else config.interfaces
     sniffer = NetworkSniffer(
-        interface=args.interface,
+        interface=interfaces,
         packet_handler=engine.handle_packet,
         bpf_filter=args.bpf_filter,
     )
