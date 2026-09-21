@@ -105,6 +105,35 @@ class TlsAnomalyConfig:
 
 
 @dataclass
+class MlAnomalyConfig:
+    """Thresholds for ML-based anomaly detection -- see src/detectors.py
+    (MLAnomalyDetector) and src/ml_features.py. Disabled by default: this
+    detector needs a trained model (scripts/train_ml_model.py) before it can
+    do anything, and a fresh install has no model to load yet.
+    """
+
+    enabled: bool = False
+    # where MLAnomalyDetector loads its trained model from, and where
+    # scripts/train_ml_model.py saves one to by default
+    model_path: str = "data/ml_model.joblib"
+    # "isolation_forest" or "random_forest" -- also read by
+    # scripts/train_ml_model.py as its default training algorithm
+    algorithm: str = "isolation_forest"
+    # expected proportion of anomalous traffic in the training set; passed
+    # to IsolationForest's own `contamination` parameter at training time,
+    # not used at inference time
+    contamination: float = 0.05
+    # a window scoring below this is flagged as anomalous -- see
+    # MLAnomalyDetector._score for what "score" means for each algorithm
+    anomaly_score_threshold: float = -0.5
+    # size (seconds) of the rolling per-source-IP window used to compute
+    # traffic features -- see src/ml_features.py
+    feature_window_seconds: int = 10
+    # seconds to wait before re-alerting on the same source IP
+    cooldown: float = 60.0
+
+
+@dataclass
 class DatabaseConfig:
     """SQLite event database settings."""
 
@@ -231,6 +260,7 @@ class Config:
     traffic_anomaly: TrafficAnomalyConfig = field(default_factory=TrafficAnomalyConfig)
     dns_tunnel: DnsTunnelConfig = field(default_factory=DnsTunnelConfig)
     tls_anomaly: TlsAnomalyConfig = field(default_factory=TlsAnomalyConfig)
+    ml_anomaly: MlAnomalyConfig = field(default_factory=MlAnomalyConfig)
     # source IPs/CIDR ranges that skip detection entirely, see src/engine.py
     whitelist: List[str] = field(default_factory=list)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)

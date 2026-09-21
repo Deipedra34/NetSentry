@@ -96,6 +96,32 @@ tls_anomaly:
 #   flag_recently_issued_days: 0
 #   cooldown: 60
 
+# Machine learning anomaly detection: scores per-source-IP traffic patterns
+# (packet rate, port/IP fan-out, packet size, protocol mix, SYN ratio)
+# against an offline-trained Isolation Forest or Random Forest model instead
+# of a fixed threshold. Disabled by default -- it needs a trained model
+# first, see README.md "Machine Learning Anomaly Detection" and
+# scripts/train_ml_model.py.
+ml_anomaly:
+  enabled: false
+  model_path: "data/ml_model.joblib" # where the trained model is loaded from
+  algorithm: "isolation_forest" # "isolation_forest" or "random_forest"
+  contamination: 0.05 # expected proportion of anomalous traffic (IsolationForest training only)
+  anomaly_score_threshold: -0.5 # a window scoring below this is flagged as anomalous
+  feature_window_seconds: 10 # size of the per-source-IP rolling feature window
+  cooldown: 60 # seconds to wait before re-alerting on the same source IP
+
+# Example ml_anomaly block once you've trained a model with
+# scripts/train_ml_model.py (see README.md for the full walkthrough):
+# ml_anomaly:
+#   enabled: true
+#   model_path: "data/ml_model.joblib"
+#   algorithm: "isolation_forest"
+#   contamination: 0.05
+#   anomaly_score_threshold: -0.5
+#   feature_window_seconds: 10
+#   cooldown: 60
+
 # IP whitelist: packets whose source IP matches an entry here skip detection
 # entirely. Entries can be exact IPs or CIDR ranges.
 # whitelist:

@@ -19,6 +19,7 @@ from src.detectors import (
     Detector,
     DNSTunnelDetector,
     DosDetector,
+    MLAnomalyDetector,
     PortScanDetector,
     TLSAnomalyDetector,
     TrafficAnomalyDetector,
@@ -37,6 +38,7 @@ DETECTOR_NAMES = (
     "traffic_anomaly",
     "dns_tunnel",
     "tls_anomaly",
+    "ml_anomaly",
 )
 
 
@@ -111,6 +113,16 @@ def build_detectors(config: Config, enabled: List[str] | None = None) -> List[De
                 flag_short_validity_days=config.tls_anomaly.flag_short_validity_days,
                 flag_recently_issued_days=config.tls_anomaly.flag_recently_issued_days,
                 cooldown=config.tls_anomaly.cooldown,
+            )
+        )
+    if wants("ml_anomaly", config.ml_anomaly.enabled):
+        detectors.append(
+            MLAnomalyDetector(
+                model_path=config.ml_anomaly.model_path,
+                algorithm=config.ml_anomaly.algorithm,
+                anomaly_score_threshold=config.ml_anomaly.anomaly_score_threshold,
+                feature_window_seconds=config.ml_anomaly.feature_window_seconds,
+                cooldown=config.ml_anomaly.cooldown,
             )
         )
 

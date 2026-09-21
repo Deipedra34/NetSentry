@@ -21,7 +21,7 @@ database, and surfaces them on a self-refreshing Flask dashboard.
 
 ## Features
 
-NetSentry ships with six independent detectors, each individually
+NetSentry ships with seven independent detectors, each individually
 configurable and individually toggleable:
 
 | Detector | What it catches | Signal |
@@ -32,6 +32,7 @@ configurable and individually toggleable:
 | **Traffic Anomaly** | General statistical spikes in traffic volume | Packets-per-window exceeding *X*× the rolling baseline average |
 | **DNS Tunneling** | Data exfiltration / C2 hidden inside DNS queries | Long or high-entropy subdomains, an excessive per-IP query rate, and/or tunneling-friendly record types (TXT/NULL/CNAME) |
 | **TLS/HTTPS Anomaly** | Malware/C2 traffic hidden inside TLS handshakes | A client JA3 fingerprint on a known-malicious blocklist, and/or a server certificate that's self-signed, expired, short-lived, or very recently issued |
+| **ML Anomaly Detection** | Traffic patterns that don't fit any fixed threshold | An Isolation Forest / Random Forest model trained on your own captured traffic scores each source IP's packet rate, port/IP fan-out, packet size, protocol mix, and SYN ratio; **opt-in, disabled by default** -- needs a trained model first, see below |
 
 Every detected event is persisted with a timestamp, source IP, event type,
 and a human-readable details string, and is immediately visible on the live
@@ -56,6 +57,7 @@ flowchart LR
         ANOM["TrafficAnomalyDetector"]
         DNS["DNSTunnelDetector"]
         TLS["TLSAnomalyDetector"]
+        ML["MLAnomalyDetector"]
     end
 
     Engine --> PS
@@ -64,6 +66,7 @@ flowchart LR
     Engine --> ANOM
     Engine --> DNS
     Engine --> TLS
+    Engine --> ML
 
     PS -->|"Event"| DB[("SQLite\nnetsentry.db")]
     ARP -->|"Event"| DB
@@ -71,6 +74,10 @@ flowchart LR
     ANOM -->|"Event"| DB
     DNS -->|"Event"| DB
     TLS -->|"Event"| DB
+    ML -->|"Event"| DB
+
+    Model[("data/ml_model.joblib\n(trained offline)")] -.loaded at startup.-> ML
+    Train["scripts/train_ml_model.py"] -.saves.-> Model
 
     DB --> Web["Flask dashboard\n(web.py)"]
     Web -->|"HTTP :5000"| Browser["Browser\n(auto-refreshing table)"]
@@ -108,6 +115,8 @@ netsentry/
 ├── config.yaml                 # Threshold / runtime configuration
 ├── requirements.txt
 ├── requirements-desktop.txt     # Extra dep (pywebview) for desktop_app.py
+├── scripts/
+│   └── train_ml_model.py         # Offline trainer for MLAnomalyDetector's model
 ├── src/
 │   ├── config.py                # Typed config dataclasses + YAML loader
 │   ├── packet_info.py            # Protocol-agnostic packet representation
@@ -115,15 +124,17 @@ netsentry/
 │   ├── engine.py                 # Wires detectors + database together
 │   ├── database.py               # SQLite event storage
 │   ├── logging_config.py         # Console + rotating file logging
-│   ├── detectors.py              # Detector interface + all six detectors
+│   ├── detectors.py              # Detector interface + all seven detectors
 │   ├── tls_parser.py             # Minimal TLS handshake parsing (JA3 + certs)
+│   ├── ml_features.py            # Per-source-IP traffic feature extraction
 │   ├── notifications.py          # Discord / Telegram / email alert dispatch
 │   ├── pcap_export.py            # Auto .pcap export of critical-event traffic
 │   ├── web.py                    # Flask app, JSON API, self-signed TLS setup
 │   └── templates/
 │       └── dashboard.html
 ├── data/
-│   └── ja3_blocklist.txt         # User-supplied JA3 threat intel (empty by default)
+│   ├── ja3_blocklist.txt         # User-supplied JA3 threat intel (empty by default)
+│   └── ml_model.joblib           # Trained MLAnomalyDetector model (not shipped, see below)
 └── tests/
     ├── conftest.py                # Shared fixtures / mock packet builder
     ├── test_port_scan.py
@@ -132,6 +143,7 @@ netsentry/
     ├── test_traffic_anomaly.py
     ├── test_dns_tunnel.py
     ├── test_tls_anomaly.py
+    ├── test_ml_anomaly.py
     ├── test_database.py
     ├── test_config.py
     ├── test_sniffer.py
@@ -712,6 +724,98 @@ rotation).
 
 ---
 
+## Machine Learning Anomaly Detection
+
+Every other detector in NetSentry looks for one specific, known pattern —
+too many ports, too many SYNs, a suspicious DNS name. `MLAnomalyDetector`
+(`src/detectors.py`) takes a different approach: it scores each source IP's
+overall traffic *shape* against a model trained on what your network
+normally looks like, so it can flag things that don't match any fixed rule
+without anyone having had to define that rule in advance.
+
+**Opt-in and disabled by default.** Unlike every other detector,
+`ml_anomaly.enabled` defaults to `false` and stays that way even if you
+otherwise customize `config.yaml` — this detector is useless (and NetSentry
+will say so in the logs, not fail silently) without a model trained on your
+own traffic first. There's no generic pretrained model that would make sense
+across arbitrary networks.
+
+**Features.** Per source IP, `src/ml_features.py` accumulates traffic over a
+rolling `feature_window_seconds` window and computes eight numbers from it —
+no payload inspection, just the same header-level `PacketInfo` fields every
+other detector already uses:
+
+| # | Feature | Meaning |
+|---|---|---|
+| 0 | `packet_rate` | Packets/second from this source IP during the window |
+| 1 | `unique_dst_ports` | Distinct destination ports contacted |
+| 2 | `unique_dst_ips` | Distinct destination IPs contacted |
+| 3 | `avg_packet_size` | Mean packet length in bytes |
+| 4 | `tcp_ratio` | Share of packets that were TCP |
+| 5 | `udp_ratio` | Share of packets that were UDP |
+| 6 | `other_protocol_ratio` | Share that were neither (ARP, plain IP, etc.) |
+| 7 | `syn_ratio` | Share of this window's TCP packets that were SYN-only (connection attempts) |
+
+This exact order and meaning (`ml_features.FEATURE_NAMES`) is what has to
+match between training and inference — the training script and
+`MLAnomalyDetector` both import it from the same place rather than each
+hard-coding their own copy.
+
+**Training a model.** `scripts/train_ml_model.py` is a standalone script —
+NetSentry itself never imports it, and it has no effect on startup whether
+or not `ml_anomaly.enabled` is true. It builds a training dataset one of two
+ways:
+
+```bash
+# From a CSV of pre-extracted features (columns = the 8 above, optional
+# 'label' column of 0/1 for supervised random_forest training):
+python scripts/train_ml_model.py --csv training_features.csv
+
+# From your own captured traffic: reuses src/database.py's existing events
+# table for weak labels (was this source IP ever flagged by another
+# detector?), and NetSentry's own pcap_export feature (captures/ by default)
+# for the actual packet data -- the database only stores alert events, not
+# raw traffic, so there's no way to derive real feature vectors from it
+# alone. Turn on pcap_export, capture some traffic, then:
+python scripts/train_ml_model.py --db netsentry.db --pcap-dir captures/
+```
+
+Either way it trains an `IsolationForest` (unsupervised — the default) or a
+`RandomForestClassifier` (supervised, needs labels covering both classes),
+prints a summary (dataset size, feature count, and either the training-set
+anomaly count for Isolation Forest or accuracy/precision/recall on a held-out
+split for Random Forest), and saves the result with `joblib` to
+`--model-path` (defaults to `ml_anomaly.model_path`, i.e.
+`data/ml_model.joblib`). Run `python scripts/train_ml_model.py --help` for
+every flag, including overriding the algorithm and `contamination`.
+
+**Inference.** Once enabled, `MLAnomalyDetector` loads the model at startup.
+If `model_path` doesn't exist or fails to load, it logs a clear warning
+pointing at `scripts/train_ml_model.py` and disables itself for the run
+rather than crashing NetSentry — the same pattern `TLSAnomalyDetector` uses
+when its JA3 blocklist file is missing. Once loaded, each source IP's
+feature window is scored as soon as it closes; a score below
+`anomaly_score_threshold` raises an `ML_ANOMALY` event whose `details`
+include the score and whichever raw features were most unusual against the
+training set's mean/std (when the model bundle carries them, which it does
+when trained via the script above). Like every other detector, it applies a
+per-source-IP `cooldown` and flows through notifications, PCAP export, the
+whitelist, and auto-block with no special-casing.
+
+**Realistic expectations.** A model is only as good as what it was trained
+on. Training on too little traffic, or traffic that isn't representative of
+your network's normal behavior (e.g. a capture window that happens to miss
+an entire class of everyday traffic), will produce a model that either
+misses real anomalies or flags routine activity — retrain periodically as
+your network's baseline changes, and treat `ML_ANOMALY` events as one more
+signal to correlate against the rule-based detectors' more specific alerts,
+not a replacement for them.
+
+Thresholds live under `ml_anomaly` in `config.yaml` — see the commented
+example already in the shipped file.
+
+---
+
 ## Testing
 
 The full test suite runs entirely offline against synthetic packet data —
@@ -728,13 +832,16 @@ covering both the "should not alert" and "should alert" paths, plus edge
 cases like sliding-window expiry, per-IP isolation, and (for the DNS tunnel
 detector) each scoring signal in isolation. `tests/test_sniffer.py`
 crafts real Scapy packets in memory to validate packet parsing without
-touching a network interface.
+touching a network interface. `tests/test_ml_anomaly.py` fits tiny synthetic
+IsolationForest/RandomForestClassifier models inline (a handful of data
+points, no real training run) rather than depending on
+`scripts/train_ml_model.py` or a shipped model file.
 
 ---
 
 ## How each detector works
 
-All six live in `src/detectors.py`:
+All seven live in `src/detectors.py`:
 
 - **Port Scan** (`PortScanDetector`): maintains a per-source-IP map of
   `{port: last_seen_timestamp}`, prunes entries older than the configured
@@ -762,6 +869,14 @@ All six live in `src/detectors.py`:
   expired, short-lived, recently issued); alerts if any condition fires,
   naming which one(s). See
   [TLS/HTTPS Anomaly Detection](#tlshttps-anomaly-detection) for tuning.
+- **ML Anomaly Detection** (`MLAnomalyDetector`): accumulates each source
+  IP's traffic into a rolling feature window (`src/ml_features.py`), scores
+  the resulting vector against an offline-trained Isolation Forest or Random
+  Forest model once the window closes, and alerts when the score crosses
+  `anomaly_score_threshold`. Disabled by default and no-ops if no model is
+  loaded. See
+  [Machine Learning Anomaly Detection](#machine-learning-anomaly-detection)
+  for training and tuning.
 
 All detectors implement per-source cooldowns so a sustained attack produces
 one alert per cooldown period rather than one per packet.

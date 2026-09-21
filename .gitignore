@@ -52,6 +52,7 @@ netsentry.log
 *.log
 *.pcap
 *.pcapng
+*.joblib
 
 # --- Environment / secrets ---
 .env

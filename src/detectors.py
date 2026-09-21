@@ -14,8 +14,11 @@ import math
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict, deque
 from pathlib import Path
-from typing import Deque, Dict, FrozenSet, List, Optional
+from typing import Any, Deque, Dict, FrozenSet, List, Optional
 
+import joblib
+
+from src import ml_features
 from src.database import Event
 from src.packet_info import PacketInfo
 from src.utils import to_datetime
@@ -30,6 +33,7 @@ __all__ = [
     "TrafficAnomalyDetector",
     "DNSTunnelDetector",
     "TLSAnomalyDetector",
+    "MLAnomalyDetector",
 ]
 
 
@@ -613,4 +617,160 @@ class TLSAnomalyDetector(Detector):
             source_ip=packet.src_ip,
             details=details,
             timestamp=now,
+        )
+
+
+def _load_ml_model(path: str) -> Optional[Dict[str, Any]]:
+    """Loads the joblib-serialized model bundle produced by
+    scripts/train_ml_model.py. Returns None (never raises) if the file is
+    missing or fails to load -- MLAnomalyDetector treats that as "no model
+    available yet" and disables itself for the run instead of crashing
+    NetSentry, since this feature requires a trained model that a fresh
+    install won't have.
+    """
+    file_path = Path(path)
+    if not file_path.exists():
+        logger.warning(
+            "ML model file %s not found; MLAnomalyDetector is disabled for "
+            "this run. Run 'python scripts/train_ml_model.py' first to train "
+            "a model from your own captured traffic, then set ml_anomaly.model_path "
+            "(or leave it at the default) and ml_anomaly.enabled: true in config.yaml.",
+            file_path,
+        )
+        return None
+    try:
+        bundle = joblib.load(file_path)
+    except Exception:  # noqa: BLE001 - any load failure just means no model
+        logger.exception(
+            "Failed to load ML model from %s; MLAnomalyDetector is disabled "
+            "for this run. Run 'python scripts/train_ml_model.py' to "
+            "(re)train a model.",
+            file_path,
+        )
+        return None
+    return bundle
+
+
+class MLAnomalyDetector(Detector):
+    """Flags source IPs whose recent traffic pattern looks statistically
+    abnormal, using an offline-trained Isolation Forest or Random Forest
+    model instead of a fixed threshold.
+
+    Per-source-IP traffic features (packet rate, destination port/IP
+    fan-out, packet size, protocol mix, SYN ratio -- see src/ml_features.py
+    for the exact vector) are accumulated over a rolling
+    `feature_window_seconds` window. Once a window closes with enough
+    packets in it, the resulting feature vector is scored against the model
+    loaded from `model_path`, and an event fires if the score crosses
+    `anomaly_score_threshold`.
+
+    The model itself is trained entirely offline by
+    scripts/train_ml_model.py and only ever loaded here -- this class never
+    fits anything, it just scores. If no model is present (or it fails to
+    load), a warning explaining how to train one is logged once at startup
+    and this detector quietly does nothing for the rest of the run, the same
+    way TLSAnomalyDetector's JA3 blocklist check no-ops when the blocklist
+    file is missing rather than crashing NetSentry.
+    """
+
+    name = "ML_ANOMALY"
+
+    def __init__(
+        self,
+        model_path: str = "data/ml_model.joblib",
+        algorithm: str = "isolation_forest",
+        anomaly_score_threshold: float = -0.5,
+        feature_window_seconds: float = 10.0,
+        cooldown: float = 60.0,
+    ) -> None:
+        self.model_path = model_path
+        self.algorithm = algorithm
+        self.anomaly_score_threshold = anomaly_score_threshold
+        self.feature_window_seconds = feature_window_seconds
+        self.cooldown = cooldown
+
+        # loaded once at construction -- see src/config.py, no config-reload
+        # mechanism exists anywhere else in NetSentry either
+        self._bundle = _load_ml_model(model_path)
+        self._windows = ml_features.SourceIPFeatureWindows(feature_window_seconds)
+        self._last_alert: Dict[str, float] = {}
+
+    def process_packet(self, packet: PacketInfo) -> List[Event]:
+        """Feeds the packet into its source IP's feature window; once that
+        window closes, scores the resulting feature vector and alerts if it
+        crosses `anomaly_score_threshold`. No-ops entirely if no model was
+        loaded."""
+        if self._bundle is None:
+            return []
+
+        vector = self._windows.add_packet(packet)
+        if vector is None:
+            return []
+
+        score = self._score(vector)
+        if score >= self.anomaly_score_threshold:
+            return []
+
+        last_alert = self._last_alert.get(packet.src_ip, float("-inf"))
+        if packet.timestamp - last_alert < self.cooldown:
+            return []
+
+        self._last_alert[packet.src_ip] = packet.timestamp
+        details = self._describe(vector, score)
+        return [
+            Event(
+                event_type=self.name,
+                source_ip=packet.src_ip,
+                details=details,
+                timestamp=to_datetime(packet.timestamp),
+            )
+        ]
+
+    def _score(self, vector: List[float]) -> float:
+        """Scores one feature vector on a single "lower is more anomalous"
+        scale, so one `anomaly_score_threshold` works for either algorithm:
+
+          - isolation_forest: IsolationForest.decision_function's own score,
+            roughly in [-0.5, 0.5], negative meaning anomalous. Used as-is.
+          - random_forest: no equivalent decision_function, so this maps
+            RandomForestClassifier.predict_proba's P(anomaly) onto the same
+            convention via `1 - 2 * P(anomaly)` -- P(anomaly)=1 (the model is
+            sure this is anomalous) becomes -1, P(anomaly)=0 becomes +1.
+        """
+        model = self._bundle["model"]
+        algorithm = self._bundle.get("algorithm", self.algorithm)
+        sample = [vector]
+        if algorithm == "random_forest":
+            classes = list(getattr(model, "classes_", [0, 1]))
+            anomaly_index = classes.index(1) if 1 in classes else len(classes) - 1
+            proba = model.predict_proba(sample)[0][anomaly_index]
+            return 1.0 - 2.0 * proba
+        return float(model.decision_function(sample)[0])
+
+    def _describe(self, vector: List[float], score: float) -> str:
+        """Human-readable details string: the score plus whichever raw
+        features are most unusual against the training set's mean/std, when
+        the loaded model bundle carries them (it does when trained via
+        scripts/train_ml_model.py); otherwise just the raw feature values."""
+        names = self._bundle.get("feature_names") or ml_features.FEATURE_NAMES
+        mean = self._bundle.get("feature_mean")
+        std = self._bundle.get("feature_std")
+        raw = ", ".join(f"{name}={value:.2f}" for name, value in zip(names, vector))
+
+        if mean and std and len(mean) == len(vector) and len(std) == len(vector):
+            z_scores = [
+                (name, (value - m) / s if s else 0.0)
+                for name, value, m, s in zip(names, vector, mean, std)
+            ]
+            top = sorted(z_scores, key=lambda item: abs(item[1]), reverse=True)[:3]
+            unusual = ", ".join(f"{name} (z={z:.1f})" for name, z in top)
+            return (
+                f"Anomalous traffic pattern (score {score:.3f}, threshold "
+                f"{self.anomaly_score_threshold:.3f}) -- most unusual: {unusual}; "
+                f"raw features: {raw}"
+            )
+
+        return (
+            f"Anomalous traffic pattern (score {score:.3f}, threshold "
+            f"{self.anomaly_score_threshold:.3f}); raw features: {raw}"
         )

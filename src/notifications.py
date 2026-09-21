@@ -26,8 +26,10 @@ logger = logging.getLogger("netsentry.notifications")
 # inherently critical, traffic anomalies flag volumetric spikes, port scans
 # are included too since Event doesn't carry a severity/priority field to
 # distinguish "probing" from "worse", DNS tunneling points at active
-# exfiltration / C2, and TLS anomalies (blocklisted JA3 fingerprints,
-# suspicious certificates) point at the same thing over HTTPS.
+# exfiltration / C2, TLS anomalies (blocklisted JA3 fingerprints, suspicious
+# certificates) point at the same thing over HTTPS, and ML anomalies flag
+# traffic patterns the model wasn't trained on -- a statistical cousin of
+# TRAFFIC_ANOMALY, so it's ranked the same.
 CRITICAL_EVENT_TYPES = {
     "SYN_FLOOD",
     "ARP_SPOOF",
@@ -35,6 +37,7 @@ CRITICAL_EVENT_TYPES = {
     "PORT_SCAN",
     "DNS_TUNNEL",
     "TLS_ANOMALY",
+    "ML_ANOMALY",
 }
 
 # Relative ranking within CRITICAL_EVENT_TYPES, low to high -- formalizes the
@@ -45,6 +48,7 @@ SEVERITY_LEVELS = ["low", "medium", "high", "critical"]
 EVENT_SEVERITY: Dict[str, str] = {
     "PORT_SCAN": "low",
     "TRAFFIC_ANOMALY": "medium",
+    "ML_ANOMALY": "medium",
     "ARP_SPOOF": "high",
     "DNS_TUNNEL": "high",
     "TLS_ANOMALY": "high",
