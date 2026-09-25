@@ -37,6 +37,7 @@ from src.logging_config import setup_logging
 from src.notifications import NotificationDispatcher
 from src.pcap_export import PcapExporter
 from src.sniffer import NetworkSniffer, list_interfaces
+from src.threat_intel import ThreatIntelLookup
 
 logger = logging.getLogger("netsentry.main")
 
@@ -230,6 +231,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     notifier = NotificationDispatcher(config)
     pcap_exporter = PcapExporter(config)
     auto_blocker = AutoBlocker(config, database, whitelist=config.whitelist)
+    threat_intel = ThreatIntelLookup(config, database, whitelist=config.whitelist)
     engine = DetectionEngine(
         database,
         detectors,
@@ -237,6 +239,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         notifier=notifier,
         pcap_exporter=pcap_exporter,
         auto_blocker=auto_blocker,
+        threat_intel=threat_intel,
     )
 
     if args.web:

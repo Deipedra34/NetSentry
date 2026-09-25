@@ -179,6 +179,25 @@ notifications:
 #   dry_run: false # set to false only when you are sure -- defaults to true so nobody
 #                   # accidentally locks themselves out of their own network
 
+# Threat intelligence lookups: query AbuseIPDB and/or VirusTotal for the
+# source IP behind a critical event and append the results to the event's
+# details (logs, notifications, dashboard). Disabled by default. Both API
+# keys are free to obtain but have daily usage limits -- results are cached
+# per IP for cache_ttl_hours to conserve quota, and private/whitelisted IPs
+# are never looked up. Either service can be used on its own. See README.md
+# "Threat Intelligence Lookups".
+# threat_intel:
+#   enabled: true
+#   min_severity: high # low | medium | high | critical -- only events at or above this get looked up
+#   cache_ttl_hours: 24 # reuse a lookup for this long before querying the same IP again
+#   abuseipdb:
+#     enabled: true
+#     api_key: "your-abuseipdb-api-key"
+#     max_age_days: 90 # how far back AbuseIPDB checks for reports
+#   virustotal:
+#     enabled: true
+#     api_key: "your-virustotal-api-key"
+
 database:
   path: netsentry.db
 

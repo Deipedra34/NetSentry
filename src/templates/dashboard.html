@@ -114,6 +114,7 @@
   .badge.SYN_FLOOD { background: rgba(239,91,91,0.15); color: var(--danger); }
   .badge.TRAFFIC_ANOMALY { background: rgba(79,209,197,0.15); color: var(--accent); }
   .empty { color: var(--muted); padding: 2rem; text-align: center; }
+  .muted { color: var(--muted); }
   footer {
     text-align: center;
     color: var(--muted);
@@ -144,10 +145,11 @@
         <th style="width: 10rem;">Source IP</th>
         <th style="width: 10rem;">Event Type</th>
         <th>Details</th>
+        <th style="width: 11rem;">Threat Intel</th>
       </tr>
     </thead>
     <tbody id="events-body">
-      <tr><td colspan="4" class="empty">Waiting for events&hellip;</td></tr>
+      <tr><td colspan="5" class="empty">Waiting for events&hellip;</td></tr>
     </tbody>
   </table>
 
@@ -180,6 +182,18 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+function formatThreatIntel(ti) {
+  if (!ti) return '<span class="muted">&mdash;</span>';
+  const parts = [];
+  if (ti.abuseipdb_score !== null) {
+    parts.push(`AbuseIPDB: ${escapeHtml(String(ti.abuseipdb_score))}% (${escapeHtml(String(ti.abuseipdb_reports ?? 0))} reports)`);
+  }
+  if (ti.virustotal_malicious_count !== null) {
+    parts.push(`VirusTotal: ${escapeHtml(String(ti.virustotal_malicious_count))}/${escapeHtml(String(ti.virustotal_total_engines ?? 0))} malicious`);
+  }
+  return parts.length ? parts.join("<br>") : '<span class="muted">&mdash;</span>';
+}
+
 async function refreshEvents() {
   try {
     const [eventsRes, statsRes, blockedRes] = await Promise.all([
@@ -199,7 +213,7 @@ async function refreshEvents() {
 
     const body = document.getElementById("events-body");
     if (!events.length) {
-      body.innerHTML = '<tr><td colspan="4" class="empty">No events detected yet.</td></tr>';
+      body.innerHTML = '<tr><td colspan="5" class="empty">No events detected yet.</td></tr>';
     } else {
       body.innerHTML = events.map(ev => `
         <tr>
@@ -207,6 +221,7 @@ async function refreshEvents() {
           <td>${escapeHtml(ev.source_ip)}</td>
           <td><span class="badge ${escapeHtml(ev.event_type)}">${escapeHtml(ev.event_type)}</span></td>
           <td>${escapeHtml(ev.details)}</td>
+          <td>${formatThreatIntel(ev.threat_intel)}</td>
         </tr>
       `).join("");
     }

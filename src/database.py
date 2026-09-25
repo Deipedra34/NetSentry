@@ -67,6 +67,34 @@ class BlockedIP:
         }
 
 
+@dataclass
+class ThreatIntelResult:
+    """One cached AbuseIPDB/VirusTotal lookup for a source IP (see
+    src/threat_intel.py). A service's fields stay None if it wasn't queried
+    or its lookup failed. raw_response_summary is a small JSON blob of the
+    parsed fields, not the full API responses.
+    """
+
+    source_ip: str
+    checked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    abuseipdb_score: Optional[int] = None
+    abuseipdb_reports: Optional[int] = None
+    virustotal_malicious_count: Optional[int] = None
+    virustotal_total_engines: Optional[int] = None
+    raw_response_summary: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """for jsonify() basically, converts to plain dict"""
+        return {
+            "source_ip": self.source_ip,
+            "checked_at": self.checked_at.isoformat(),
+            "abuseipdb_score": self.abuseipdb_score,
+            "abuseipdb_reports": self.abuseipdb_reports,
+            "virustotal_malicious_count": self.virustotal_malicious_count,
+            "virustotal_total_engines": self.virustotal_total_engines,
+        }
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,7 +116,22 @@ CREATE TABLE IF NOT EXISTS blocked_ips (
 );
 CREATE INDEX IF NOT EXISTS idx_blocked_ips_source_ip ON blocked_ips (source_ip);
 CREATE INDEX IF NOT EXISTS idx_blocked_ips_expires_at ON blocked_ips (expires_at);
+
+CREATE TABLE IF NOT EXISTS threat_intel_cache (
+    source_ip TEXT PRIMARY KEY,
+    checked_at TEXT NOT NULL,
+    abuseipdb_score INTEGER,
+    abuseipdb_reports INTEGER,
+    virustotal_malicious_count INTEGER,
+    virustotal_total_engines INTEGER,
+    raw_response_summary TEXT NOT NULL DEFAULT ''
+);
 """
+
+_THREAT_INTEL_COLUMNS = (
+    "source_ip, checked_at, abuseipdb_score, abuseipdb_reports, "
+    "virustotal_malicious_count, virustotal_total_engines, raw_response_summary"
+)
 
 
 def _row_to_blocked_ip(row: sqlite3.Row) -> BlockedIP:
@@ -99,6 +142,18 @@ def _row_to_blocked_ip(row: sqlite3.Row) -> BlockedIP:
         expires_at=datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None,
         event_type=row["event_type"],
         rule_identifier=row["rule_identifier"],
+    )
+
+
+def _row_to_threat_intel(row: sqlite3.Row) -> ThreatIntelResult:
+    return ThreatIntelResult(
+        source_ip=row["source_ip"],
+        checked_at=datetime.fromisoformat(row["checked_at"]),
+        abuseipdb_score=row["abuseipdb_score"],
+        abuseipdb_reports=row["abuseipdb_reports"],
+        virustotal_malicious_count=row["virustotal_malicious_count"],
+        virustotal_total_engines=row["virustotal_total_engines"],
+        raw_response_summary=row["raw_response_summary"],
     )
 
 
@@ -129,6 +184,13 @@ class Database:
             self._conn.commit()
             event.id = cursor.lastrowid
         return event
+
+    def update_event_details(self, event_id: int, details: str) -> None:
+        """Rewrites an already-logged event's details -- used to attach
+        threat intel results after the event was first written."""
+        with self._lock:
+            self._conn.execute("UPDATE events SET details = ? WHERE id = ?", (details, event_id))
+            self._conn.commit()
 
     def get_events(
         self,
@@ -235,6 +297,50 @@ class Database:
         """Drops the tracking row once a block's been lifted at the firewall."""
         with self._lock:
             self._conn.execute("DELETE FROM blocked_ips WHERE id = ?", (blocked_id,))
+            self._conn.commit()
+
+    def get_threat_intel(self, source_ip: str) -> Optional[ThreatIntelResult]:
+        """The cached threat intel lookup for source_ip, if any (stale or
+        not -- ThreatIntelLookup decides whether it's still fresh)."""
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {_THREAT_INTEL_COLUMNS} FROM threat_intel_cache WHERE source_ip = ?",
+                (source_ip,),
+            ).fetchone()
+        return _row_to_threat_intel(row) if row else None
+
+    def get_threat_intel_for_ips(self, source_ips: List[str]) -> Dict[str, ThreatIntelResult]:
+        """Cached lookups for several IPs at once, keyed by IP -- IPs with
+        no cached lookup are just left out. For the dashboard."""
+        unique_ips = list(set(source_ips))
+        if not unique_ips:
+            return {}
+        placeholders = ", ".join("?" for _ in unique_ips)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {_THREAT_INTEL_COLUMNS} FROM threat_intel_cache "
+                f"WHERE source_ip IN ({placeholders})",
+                unique_ips,
+            ).fetchall()
+        return {row["source_ip"]: _row_to_threat_intel(row) for row in rows}
+
+    def save_threat_intel(self, result: ThreatIntelResult) -> None:
+        """Inserts or replaces the cached lookup for result.source_ip --
+        only the latest lookup per IP is kept."""
+        with self._lock:
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO threat_intel_cache ({_THREAT_INTEL_COLUMNS}) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    result.source_ip,
+                    result.checked_at.isoformat(),
+                    result.abuseipdb_score,
+                    result.abuseipdb_reports,
+                    result.virustotal_malicious_count,
+                    result.virustotal_total_engines,
+                    result.raw_response_summary,
+                ),
+            )
             self._conn.commit()
 
     def close(self) -> None:

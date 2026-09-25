@@ -226,6 +226,41 @@ class AutoBlockConfig:
 
 
 @dataclass
+class AbuseIPDBConfig:
+    """AbuseIPDB API settings for threat intel lookups."""
+
+    enabled: bool = False
+    api_key: str = ""
+    # how far back (days) AbuseIPDB should look for reports on an IP
+    max_age_days: int = 90
+
+
+@dataclass
+class VirusTotalConfig:
+    """VirusTotal API settings for threat intel lookups."""
+
+    enabled: bool = False
+    api_key: str = ""
+
+
+@dataclass
+class ThreatIntelConfig:
+    """AbuseIPDB/VirusTotal reputation lookups for the source IPs behind
+    critical events -- see src/threat_intel.py. Disabled by default since
+    both services need an API key the user has to supply; either one can be
+    used on its own."""
+
+    enabled: bool = False
+    abuseipdb: AbuseIPDBConfig = field(default_factory=AbuseIPDBConfig)
+    virustotal: VirusTotalConfig = field(default_factory=VirusTotalConfig)
+    # only events at or above this level get looked up, to conserve API
+    # quota -- see EVENT_SEVERITY / SEVERITY_LEVELS in src/notifications.py
+    min_severity: str = "high"
+    # hours a lookup result for an IP is reused before querying again
+    cache_ttl_hours: int = 24
+
+
+@dataclass
 class WebConfig:
     """Flask dashboard settings."""
 
@@ -269,6 +304,7 @@ class Config:
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     pcap_export: PcapExportConfig = field(default_factory=PcapExportConfig)
     auto_block: AutoBlockConfig = field(default_factory=AutoBlockConfig)
+    threat_intel: ThreatIntelConfig = field(default_factory=ThreatIntelConfig)
 
 
 def _merge_dataclass(instance: Any, overrides: Dict[str, Any]) -> Any:

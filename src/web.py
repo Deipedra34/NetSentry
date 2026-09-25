@@ -66,13 +66,22 @@ def create_app(
     def api_events() -> Any:
         """JSON list of recent events, newest first. Takes optional query
         params: limit (default 100, capped at 1000 so nobody accidentally
-        nukes the browser with a huge response), event_type, source_ip."""
+        nukes the browser with a huge response), event_type, source_ip.
+        Each event also carries `threat_intel`: the latest cached
+        AbuseIPDB/VirusTotal lookup for its source IP, or null."""
         limit = min(request.args.get("limit", default=100, type=int) or 100, 1000)
         event_type = request.args.get("event_type") or None
         source_ip = request.args.get("source_ip") or None
 
         events = database.get_events(limit=limit, event_type=event_type, source_ip=source_ip)
-        return jsonify([event.to_dict() for event in events])
+        intel = database.get_threat_intel_for_ips([event.source_ip for event in events])
+        payload = []
+        for event in events:
+            item = event.to_dict()
+            cached = intel.get(event.source_ip)
+            item["threat_intel"] = cached.to_dict() if cached else None
+            payload.append(item)
+        return jsonify(payload)
 
     @app.route("/api/stats")
     def api_stats() -> Any:

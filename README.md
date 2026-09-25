@@ -129,6 +129,7 @@ netsentry/
 │   ├── ml_features.py            # Per-source-IP traffic feature extraction
 │   ├── notifications.py          # Discord / Telegram / email alert dispatch
 │   ├── pcap_export.py            # Auto .pcap export of critical-event traffic
+│   ├── threat_intel.py           # AbuseIPDB / VirusTotal source IP lookups
 │   ├── web.py                    # Flask app, JSON API, self-signed TLS setup
 │   └── templates/
 │       └── dashboard.html
@@ -150,6 +151,7 @@ netsentry/
     ├── test_engine.py
     ├── test_notifications.py
     ├── test_pcap_export.py
+    ├── test_threat_intel.py
     └── test_web_app.py
 ```
 
@@ -621,6 +623,70 @@ clear everything out:
    `sqlite3 netsentry.db "DELETE FROM blocked_ips WHERE source_ip = '<ip>';"`.
 4. To stop auto-blocking entirely, set `auto_block.enabled: false` (or pass
    `--auto-block-dry-run`) and restart.
+
+---
+
+## Threat Intelligence Lookups
+
+NetSentry can look up the source IP behind a critical event on
+[AbuseIPDB](https://www.abuseipdb.com/) and/or
+[VirusTotal](https://www.virustotal.com/) and append what they know to the
+event's details, e.g.:
+
+```
+... [AbuseIPDB: 87% confidence, 42 reports | VirusTotal: 12/94 engines flagged malicious]
+```
+
+That enriched text shows up everywhere event details already do — the log,
+Discord/Telegram/email notifications, and the dashboard, which also gets a
+dedicated **Threat Intel** column. Lookups are handled by
+`ThreatIntelLookup` in `src/threat_intel.py`.
+
+This is **opt-in and disabled by default**, since both services need an API
+key you have to supply yourself. Both keys are free:
+
+- **AbuseIPDB:** create a free account, then generate a key under
+  *Account → API* at <https://www.abuseipdb.com/account/api>.
+- **VirusTotal:** create a free community account; your key is shown under
+  your profile's *API Key* page at <https://www.virustotal.com/gui/my-apikey>.
+
+Either service can be used on its own — if you only have one key, just leave
+the other one disabled.
+
+```yaml
+threat_intel:
+  enabled: true
+  min_severity: high     # low | medium | high | critical
+  cache_ttl_hours: 24
+  abuseipdb:
+    enabled: true
+    api_key: "your-abuseipdb-api-key"
+    max_age_days: 90     # how far back AbuseIPDB checks for reports
+  virustotal:
+    enabled: true
+    api_key: "your-virustotal-api-key"
+```
+
+**Conserving quota.** Free tiers are tight (AbuseIPDB allows around 1,000
+checks a day, VirusTotal around 500 lookups a day at 4 per minute), so
+NetSentry keeps the number of lookups low:
+
+- Only events at or above `min_severity` are looked up. This uses the same
+  severity ranking as `auto_block.min_severity`.
+- Every result is cached per IP, in memory and in the `threat_intel_cache`
+  table in the SQLite database so the cache survives restarts. The IP is
+  only queried again once the cached result is older than
+  `cache_ttl_hours`. Clean results are cached too.
+- A sustained attack from one IP never queries the APIs more than once per
+  `notifications.cooldown` window, even while a service is failing.
+- Private/local/reserved addresses (loopback, RFC1918, link-local) and
+  whitelisted IPs are never looked up.
+
+**Failures.** Each service is queried independently with a 5-second
+timeout. A bad API key, a rate limit (HTTP 429), a timeout or a network
+error is logged as a single warning. It never stops the other service from
+being queried and never interrupts packet capture; the event just goes out
+without that service's results.
 
 ---
 
