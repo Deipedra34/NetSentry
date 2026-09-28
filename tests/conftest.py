@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 import pytest
 
@@ -48,7 +48,7 @@ def make_packet(
 
 
 @pytest.fixture()
-def in_memory_db() -> Database:
+def in_memory_db() -> Iterator[Database]:
     """An ephemeral in-memory SQLite database for tests."""
     db = Database(":memory:")
     yield db
