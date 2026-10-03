@@ -11,11 +11,52 @@ import datetime
 import ipaddress
 import secrets
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, Response, jsonify, render_template, request
 
 from src.database import Database
+
+# every event_type a detector can raise (the `name` of each class in
+# src/detectors.py). The distribution endpoint always reports all of these,
+# zero-filled, so the chart's categories don't jump around as events arrive.
+EVENT_TYPES: Tuple[str, ...] = (
+    "PORT_SCAN",
+    "ARP_SPOOF",
+    "SYN_FLOOD",
+    "TRAFFIC_ANOMALY",
+    "DNS_TUNNEL",
+    "TLS_ANOMALY",
+    "ML_ANOMALY",
+)
+
+# ?range= value -> (window length, bucket size), both in seconds. Buckets are
+# sized so each range comes out at a readable number of points (60/24/28).
+STATS_RANGES: Dict[str, Tuple[int, int]] = {
+    "1h": (3600, 60),
+    "24h": (86400, 3600),
+    "7d": (7 * 86400, 6 * 3600),
+}
+DEFAULT_STATS_RANGE = "24h"
+
+
+def _stats_window(
+    range_key: str, now: Optional[datetime.datetime] = None
+) -> Tuple[List[datetime.datetime], int]:
+    """Bucket start times (UTC, oldest first) covering range_key, plus the
+    bucket size in seconds. Buckets are aligned to whole multiples of the
+    bucket size, so the last one is the bucket that contains now."""
+    span, bucket_seconds = STATS_RANGES[range_key]
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    last_start = int(now.timestamp()) // bucket_seconds * bucket_seconds
+    count = span // bucket_seconds
+    starts = [
+        datetime.datetime.fromtimestamp(
+            last_start - (count - 1 - i) * bucket_seconds, tz=datetime.timezone.utc
+        )
+        for i in range(count)
+    ]
+    return starts, bucket_seconds
 
 
 def create_app(
@@ -91,6 +132,64 @@ def create_app(
             "by_type": database.event_type_counts(),
         }
         return jsonify(stats)
+
+    def _requested_range() -> Optional[str]:
+        """?range= value, DEFAULT_STATS_RANGE if omitted, None if invalid."""
+        range_key = request.args.get("range") or DEFAULT_STATS_RANGE
+        return range_key if range_key in STATS_RANGES else None
+
+    def _bad_range() -> Tuple[Any, int]:
+        valid = ", ".join(STATS_RANGES)
+        return jsonify({"error": f"invalid range, expected one of: {valid}"}), 400
+
+    @app.route("/api/stats/timeline")
+    def api_stats_timeline() -> Any:
+        """Event counts per time bucket, one series per event type, for the
+        dashboard's timeline chart. ?range= is 1h (1-minute buckets), 24h
+        (hourly, the default) or 7d (6-hourly). `buckets` holds each
+        bucket's start time; every list in `series` lines up with it. Only
+        types with at least one event in the window get a series."""
+        range_key = _requested_range()
+        if range_key is None:
+            return _bad_range()
+
+        starts, bucket_seconds = _stats_window(range_key)
+        first = int(starts[0].timestamp())
+        series: Dict[str, List[int]] = {}
+        for timestamp, event_type in database.get_event_times_since(starts[0]):
+            index = (int(timestamp.timestamp()) - first) // bucket_seconds
+            if 0 <= index < len(starts):
+                series.setdefault(event_type, [0] * len(starts))[index] += 1
+
+        return jsonify(
+            {
+                "range": range_key,
+                "bucket_seconds": bucket_seconds,
+                "buckets": [start.isoformat() for start in starts],
+                "series": series,
+            }
+        )
+
+    @app.route("/api/stats/distribution")
+    def api_stats_distribution() -> Any:
+        """Total events per type within ?range= (same values as the timeline
+        endpoint), for the dashboard's distribution chart. Every known type
+        is included, zero-filled."""
+        range_key = _requested_range()
+        if range_key is None:
+            return _bad_range()
+
+        starts, _ = _stats_window(range_key)
+        counts = database.event_type_counts(since=starts[0])
+        by_type = {event_type: counts.pop(event_type, 0) for event_type in EVENT_TYPES}
+        by_type.update(counts)  # anything not in EVENT_TYPES, just in case
+        return jsonify(
+            {
+                "range": range_key,
+                "total_events": sum(by_type.values()),
+                "by_type": by_type,
+            }
+        )
 
     @app.route("/api/blocked_ips")
     def api_blocked_ips() -> Any:

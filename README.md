@@ -102,8 +102,10 @@ Design notes:
   active detector, persists any resulting `Event` objects to SQLite via
   `src/database.py`, and logs them.
 - The Flask app (`src/web.py`) is a thin read-only layer over the same
-  SQLite database; the dashboard page polls `/api/events` and `/api/stats`
-  on an interval.
+  SQLite database; the dashboard page polls `/api/events`, `/api/stats`,
+  `/api/stats/timeline` and `/api/stats/distribution` on an interval.
+  Charts are drawn client-side with [Chart.js](https://www.chartjs.org/)
+  (loaded from a CDN), so there's no frontend build step.
 
 ### Project layout
 
@@ -275,7 +277,24 @@ sudo python main.py -i eth0 --web
 
 Then open the dashboard in a browser at the `host`/`port` configured under
 `web` in `config.yaml` (defaults to `https://127.0.0.1:5000`). The table
-refreshes automatically (interval configurable via `web.refresh_interval`).
+and charts refresh automatically (interval configurable via
+`web.refresh_interval`).
+
+#### Dashboard charts
+
+Above the events table, an **Activity** section shows two
+[Chart.js](https://www.chartjs.org/) charts:
+
+- **Events Over Time** — a stacked area chart of event counts per time
+  bucket, one series per event type (served by `/api/stats/timeline`).
+- **Events by Type** — a bar chart of total events per event type in the
+  selected window (served by `/api/stats/distribution`).
+
+The **1h / 24h / 7d** buttons switch the time range for both charts (1-minute,
+hourly and 6-hourly buckets respectively; 24h is the default). Both endpoints
+take the same `?range=1h|24h|7d` query parameter and return `400` for any
+other value. Chart.js loads from cdnjs, so the charts need internet access in
+the browser — without it the rest of the dashboard still works.
 
 #### Dashboard access
 
@@ -347,6 +366,9 @@ python main.py --help
 |  NetSentry — Live Dashboard                        ● updated 10:42 |
 +--------------------------------------------------------------------+
 |  Total Events: 12   Port Scans: 4   ARP: 2   SYN: 3   Anomaly: 3   |
++--------------------------------------------------------------------+
+|  Activity                                         [1h] [24h] [7d]  |
+|  Events Over Time (stacked area)   |  Events by Type (bars)       |
 +--------------------------------------------------------------------+
 | Timestamp           | Source IP     | Type            | Details    |
 |----------------------|---------------|-----------------|------------|

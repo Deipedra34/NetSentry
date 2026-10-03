@@ -113,6 +113,41 @@
   .badge.ARP_SPOOF { background: rgba(240,169,60,0.15); color: var(--warn); }
   .badge.SYN_FLOOD { background: rgba(239,91,91,0.15); color: var(--danger); }
   .badge.TRAFFIC_ANOMALY { background: rgba(79,209,197,0.15); color: var(--accent); }
+  .charts-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.75rem;
+  }
+  .charts-header h2 { font-size: 1.05rem; margin: 0; }
+  .range-selector { display: flex; gap: 0.35rem; }
+  .range-selector button {
+    background: var(--panel);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.25rem 0.8rem;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .range-selector button:hover { color: var(--text); }
+  .range-selector button.active {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(79,209,197,0.1);
+  }
+  .charts {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  @media (max-width: 900px) {
+    .charts { grid-template-columns: minmax(0, 1fr); }
+  }
+  .chart-box { position: relative; height: 260px; margin-top: 0.75rem; }
   .empty { color: var(--muted); padding: 2rem; text-align: center; }
   .muted { color: var(--muted); }
   footer {
@@ -136,6 +171,25 @@
     <div class="card"><div class="label">ARP Spoofing</div><div class="value" id="stat-ARP_SPOOF">&mdash;</div></div>
     <div class="card"><div class="label">SYN Floods</div><div class="value" id="stat-SYN_FLOOD">&mdash;</div></div>
     <div class="card"><div class="label">Traffic Anomalies</div><div class="value" id="stat-TRAFFIC_ANOMALY">&mdash;</div></div>
+  </section>
+
+  <div class="charts-header">
+    <h2>Activity</h2>
+    <div class="range-selector" id="range-selector">
+      <button type="button" data-range="1h">1h</button>
+      <button type="button" data-range="24h" class="active">24h</button>
+      <button type="button" data-range="7d">7d</button>
+    </div>
+  </div>
+  <section class="charts">
+    <div class="card">
+      <div class="label">Events Over Time</div>
+      <div class="chart-box"><canvas id="timeline-chart"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="label">Events by Type</div>
+      <div class="chart-box"><canvas id="distribution-chart"></canvas></div>
+    </div>
   </section>
 
   <table>
@@ -169,10 +223,11 @@
   </table>
 </main>
 <footer>
-  NetSentry auto-refreshes every <code>{{ refresh_interval }}</code>s &middot; API: <code>/api/events</code>, <code>/api/stats</code>, <code>/api/blocked_ips</code>
+  NetSentry auto-refreshes every <code>{{ refresh_interval }}</code>s &middot; API: <code>/api/events</code>, <code>/api/stats</code>, <code>/api/stats/timeline</code>, <code>/api/stats/distribution</code>, <code>/api/blocked_ips</code>
   <br>by Deipedra
 </footer>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script>
 const REFRESH_MS = {{ refresh_interval }} * 1000;
 
@@ -248,8 +303,158 @@ async function refreshEvents() {
   }
 }
 
-refreshEvents();
-setInterval(refreshEvents, REFRESH_MS);
+// one fixed color per event type, so a type keeps its color whatever else is
+// on screen -- the first four match the badge colors above
+const TYPE_COLORS = {
+  PORT_SCAN: "#5b8def",
+  ARP_SPOOF: "#f0a93c",
+  SYN_FLOOD: "#ef5b5b",
+  TRAFFIC_ANOMALY: "#4fd1c5",
+  DNS_TUNNEL: "#b48ef0",
+  TLS_ANOMALY: "#e879b9",
+  ML_ANOMALY: "#9ccc65",
+};
+const css = getComputedStyle(document.documentElement);
+const MUTED = css.getPropertyValue("--muted").trim();
+const BORDER = css.getPropertyValue("--border").trim();
+
+let currentRange = "24h";
+let timelineChart = null;
+let distributionChart = null;
+
+function typeColor(type) {
+  return TYPE_COLORS[type] || MUTED;
+}
+
+function formatBucket(iso, range) {
+  const d = new Date(iso);
+  if (range === "7d") {
+    return d.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  }
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function axisOptions(extra) {
+  return Object.assign({
+    ticks: { color: MUTED, precision: 0 },
+    grid: { color: BORDER },
+    border: { color: BORDER },
+  }, extra);
+}
+
+function renderTimeline(data) {
+  const labels = data.buckets.map(b => formatBucket(b, data.range));
+  // keep any series the user hid via the legend hidden across refreshes
+  const hidden = new Set();
+  if (timelineChart) {
+    timelineChart.data.datasets.forEach((ds, i) => {
+      if (!timelineChart.isDatasetVisible(i)) hidden.add(ds.label);
+    });
+  }
+  const types = Object.keys(data.series).sort();
+  const datasets = types.map((type, i) => ({
+    label: type,
+    data: data.series[type],
+    borderColor: typeColor(type),
+    backgroundColor: typeColor(type) + "33",
+    borderWidth: 2,
+    pointRadius: 0,
+    pointHoverRadius: 4,
+    tension: 0.25,
+    fill: i === 0 ? "origin" : "-1",
+    hidden: hidden.has(type),
+  }));
+
+  if (timelineChart) {
+    timelineChart.data.labels = labels;
+    timelineChart.data.datasets = datasets;
+    timelineChart.update("none");
+    return;
+  }
+  timelineChart = new Chart(document.getElementById("timeline-chart"), {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { position: "bottom", labels: { color: MUTED, boxWidth: 10, boxHeight: 10 } },
+      },
+      scales: {
+        x: axisOptions({ ticks: { color: MUTED, maxTicksLimit: 8, maxRotation: 0 }, grid: { display: false } }),
+        y: axisOptions({ stacked: true, beginAtZero: true }),
+      },
+    },
+  });
+}
+
+function renderDistribution(data) {
+  const labels = Object.keys(data.by_type);
+  const counts = labels.map(type => data.by_type[type]);
+  const colors = labels.map(typeColor);
+
+  if (distributionChart) {
+    distributionChart.data.labels = labels;
+    distributionChart.data.datasets[0].data = counts;
+    distributionChart.data.datasets[0].backgroundColor = colors;
+    distributionChart.update("none");
+    return;
+  }
+  distributionChart = new Chart(document.getElementById("distribution-chart"), {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [{ label: "Events", data: counts, backgroundColor: colors, borderRadius: 4, maxBarThickness: 18 }],
+    },
+    options: {
+      indexAxis: "y",
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: axisOptions({ beginAtZero: true }),
+        y: axisOptions({ grid: { display: false } }),
+      },
+    },
+  });
+}
+
+async function refreshCharts() {
+  // if the CDN couldn't be reached the rest of the dashboard still works
+  if (typeof Chart === "undefined") return;
+  try {
+    const range = encodeURIComponent(currentRange);
+    const [timelineRes, distributionRes] = await Promise.all([
+      fetch(`/api/stats/timeline?range=${range}`),
+      fetch(`/api/stats/distribution?range=${range}`),
+    ]);
+    renderTimeline(await timelineRes.json());
+    renderDistribution(await distributionRes.json());
+  } catch (err) {
+    console.error("NetSentry chart refresh failed:", err);
+  }
+}
+
+document.getElementById("range-selector").addEventListener("click", (e) => {
+  const button = e.target.closest("button[data-range]");
+  if (!button || button.dataset.range === currentRange) return;
+  currentRange = button.dataset.range;
+  document.querySelectorAll("#range-selector button").forEach(b => {
+    b.classList.toggle("active", b === button);
+  });
+  refreshCharts();
+});
+
+function refreshDashboard() {
+  refreshEvents();
+  refreshCharts();
+}
+
+refreshDashboard();
+setInterval(refreshDashboard, REFRESH_MS);
 </script>
 </body>
 </html>

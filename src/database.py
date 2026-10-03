@@ -13,7 +13,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -234,13 +234,31 @@ class Database:
             row = self._conn.execute("SELECT COUNT(*) AS c FROM events").fetchone()
         return int(row["c"])
 
-    def event_type_counts(self) -> Dict[str, int]:
-        """counts per event_type, e.g. {"PORT_SCAN": 12, "SYN_FLOOD": 3}"""
+    def event_type_counts(self, since: Optional[datetime] = None) -> Dict[str, int]:
+        """counts per event_type, e.g. {"PORT_SCAN": 12, "SYN_FLOOD": 3}.
+        Pass since to only count events at or after that (UTC) time."""
+        query = "SELECT event_type, COUNT(*) AS c FROM events"
+        params: List[Any] = []
+        if since is not None:
+            # timestamps are stored as UTC isoformat strings, so plain string
+            # comparison sorts them correctly
+            query += " WHERE timestamp >= ?"
+            params.append(since.isoformat())
+        query += " GROUP BY event_type"
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return {row["event_type"]: row["c"] for row in rows}
+
+    def get_event_times_since(self, since: datetime) -> List[Tuple[datetime, str]]:
+        """(timestamp, event_type) for every event at or after since, oldest
+        first -- just the two columns the dashboard's timeline chart needs."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT event_type, COUNT(*) AS c FROM events GROUP BY event_type"
+                "SELECT timestamp, event_type FROM events WHERE timestamp >= ? "
+                "ORDER BY timestamp",
+                (since.isoformat(),),
             ).fetchall()
-        return {row["event_type"]: row["c"] for row in rows}
+        return [(datetime.fromisoformat(row["timestamp"]), row["event_type"]) for row in rows]
 
     def add_blocked_ip(self, blocked: BlockedIP) -> BlockedIP:
         """Saves a new block, sets its id from the new row and hands back the
