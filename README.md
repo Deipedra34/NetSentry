@@ -117,6 +117,11 @@ netsentry/
 ├── config.yaml                 # Threshold / runtime configuration
 ├── requirements.txt
 ├── requirements-desktop.txt     # Extra dep (pywebview) for desktop_app.py
+├── Dockerfile                  # Container image (see "Docker" below)
+├── docker-compose.yml          # One-command Docker setup
+├── docker/
+│   ├── entrypoint.sh             # Fixes volume ownership, drops to non-root
+│   └── healthcheck.py            # Container HEALTHCHECK (pings /healthz)
 ├── scripts/
 │   └── train_ml_model.py         # Offline trainer for MLAnomalyDetector's model
 ├── src/
@@ -161,6 +166,17 @@ netsentry/
 
 ## Installation
 
+There are two ways to run NetSentry:
+
+- **Natively** (below) — a Python virtualenv on your machine. Works on
+  Linux, macOS, and Windows, and is the way to go for live capture on
+  Windows/macOS.
+- **Docker** — one `docker compose up -d` and you're done, no Python setup
+  needed. Full live capture works on Linux hosts; see [Docker](#docker) for
+  the details and platform caveats.
+
+### Native installation
+
 Requires **Python 3.10+**.
 
 ```bash
@@ -191,6 +207,133 @@ Live packet capture additionally requires:
 
 You do **not** need any of the above to run the test suite or browse the
 dashboard against an existing database — only to capture live traffic.
+
+---
+
+## Docker
+
+NetSentry ships with a `Dockerfile` and a `docker-compose.yml`, so it can
+run with a single command and no local Python setup.
+
+### Quick start
+
+From the project root:
+
+```bash
+docker compose up -d
+```
+
+The first run builds the image; after that it starts in seconds. This
+captures on the host's default network interface with every enabled
+detector and serves the dashboard alongside it. Open
+**https://localhost:5000** (or `https://<host-ip>:5000` from another machine
+on your network) and sign in with the `web.username`/`web.password` from
+`config.yaml` — the same self-signed-certificate warning described under
+[Dashboard access](#dashboard-access) applies.
+
+To capture on specific interface(s), set `NETSENTRY_INTERFACES`
+(space-separated for several at once — same as `-i` on a native run),
+either inline or in a `.env` file next to `docker-compose.yml`:
+
+```bash
+NETSENTRY_INTERFACES="eth0 wlan0" docker compose up -d
+```
+
+Left empty (the default), Scapy picks the host's default interface.
+
+### Logs, stopping, and restarting
+
+```bash
+docker compose logs -f      # follow the live output (alerts show up here too)
+docker compose stop         # stop it, keep the container
+docker compose down         # stop and remove the container (volumes stay on disk)
+```
+
+`docker compose ps` shows the container's health status, based on a
+built-in healthcheck that pings the dashboard's `/healthz` endpoint.
+
+### Editing the configuration
+
+`config.yaml` is mounted read-only into the container, so there's no
+rebuild needed to change thresholds, detectors, credentials, notifications,
+etc. Edit `config.yaml` on the host, then:
+
+```bash
+docker compose restart
+```
+
+A few settings are overridden inside the container through environment
+variables (set in the `Dockerfile`, and changeable via `environment:` in
+`docker-compose.yml`):
+
+| Variable | Container value | Why |
+|---|---|---|
+| `NETSENTRY_WEB_HOST` | `0.0.0.0` | Serve the dashboard beyond the container's own loopback (overrides `web.host`) |
+| `NETSENTRY_DATABASE_PATH` | `data/netsentry.db` | Keep the database in the persisted `data/` volume (overrides `database.path`) |
+| `NETSENTRY_LOG_FILE` | `logs/netsentry.log` | Keep the log file in the persisted `logs/` volume (overrides `logging.file`) |
+
+With host networking, `0.0.0.0` means the dashboard is reachable from your
+whole network, not just the host itself — keep `web.username`/`web.password`
+set, or set `NETSENTRY_WEB_HOST: 127.0.0.1` to keep it local-only.
+
+Auto-block is always forced into dry-run mode in the container
+(`--auto-block-dry-run` in the compose `command`), regardless of
+`config.yaml`. With host networking, a live auto-block would change the
+**host's** firewall rules — read [Automatic Blocking](#automatic-blocking)
+and the warning in `docker-compose.yml` before changing that.
+
+### Volume layout
+
+Everything that should survive a container rebuild lives in bind-mounted
+folders next to `docker-compose.yml`. Missing folders are created on first
+start, so a fresh clone works as-is.
+
+| Host path | Container path | What lives there |
+|---|---|---|
+| `./data/` | `/app/data` | SQLite database (`netsentry.db`: events, blocked IPs, threat-intel cache), trained ML model (`ml_model.joblib`), JA3 blocklist (`ja3_blocklist.txt`) |
+| `./captures/` | `/app/captures` | PCAP exports (when `pcap_export` is enabled) |
+| `./logs/` | `/app/logs` | Rotating log file (`netsentry.log`) |
+| `./config.yaml` | `/app/config.yaml` (read-only) | Configuration |
+
+### Capabilities
+
+The compose file grants the container two Linux capabilities instead of
+running it `--privileged`:
+
+- **`NET_RAW`** — needed to open the raw sockets Scapy captures packets with.
+- **`NET_ADMIN`** — needed for interface-level network operations (and for
+  firewall changes, should live auto-blocking ever be enabled).
+
+NetSentry itself doesn't run as root inside the container: the entrypoint
+starts as root only to fix ownership of the bind-mounted folders, then drops
+to an unprivileged `netsentry` user and passes those two capabilities on to
+it. Dashboard-only mode (`--web-only`) needs neither capability.
+
+### Platform note: Linux vs. Windows/macOS
+
+- **Linux:** fully supported. `network_mode: host` puts the container
+  directly on the host's network stack, so NetSentry sees the host's real
+  interfaces and traffic.
+- **Windows/macOS (Docker Desktop):** Docker runs inside a lightweight VM,
+  so "host" networking means *the VM's* network, not your physical
+  machine's. The container can run the dashboard and process test/pcap
+  data, but it **cannot sniff your machine's physical network
+  interfaces**. Host networking also has to be turned on in Docker Desktop
+  (Settings → Resources → Network → *Enable host networking*, Docker
+  Desktop 4.34+) for `https://localhost:5000` to reach the dashboard;
+  otherwise, add a `docker-compose.override.yml` that publishes the port
+  instead:
+
+  ```yaml
+  services:
+    netsentry:
+      network_mode: bridge
+      ports:
+        - "5000:5000"
+  ```
+
+  **For live capture on Windows, run NetSentry natively** (with Npcap,
+  see [Native installation](#native-installation)) instead of in Docker.
 
 ---
 

@@ -1,0 +1,53 @@
+# NetSentry via Docker Compose -- see README.md "Docker" for the full rundown.
+#
+#   docker compose up -d       build (first run) and start in the background
+#   docker compose logs -f     follow the logs
+#   docker compose down        stop and remove the container
+
+services:
+  netsentry:
+    build: .
+    container_name: netsentry
+
+    # Share the host's network stack so the sniffer sees the host's real
+    # interfaces and traffic, not just the container's own virtual NIC.
+    # Fully works on Linux only: on Docker Desktop (Windows/macOS) "host"
+    # is Docker's VM, not your physical machine -- see README.md "Docker".
+    network_mode: host
+
+    # Raw packet capture needs NET_RAW; NET_ADMIN covers interface-level
+    # operations (and firewall rules, if live auto-block is ever enabled).
+    # Granted here instead of running privileged -- the entrypoint passes
+    # them on to the unprivileged netsentry user the app runs as.
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+
+    environment:
+      # Interface(s) to capture on, space-separated for several at once
+      # (e.g. "eth0" or "eth0 wlan0"). Empty = let Scapy pick the host's
+      # default interface. Set it in a .env file next to this one, or inline:
+      #   NETSENTRY_INTERFACES="eth0 wlan0" docker compose up -d
+      NETSENTRY_INTERFACES: "${NETSENTRY_INTERFACES:-}"
+
+    # ##########################################################################
+    # WARNING: auto-block is forced into DRY-RUN mode below
+    # (--auto-block-dry-run), whatever config.yaml says. With host networking
+    # and NET_ADMIN, a LIVE auto-block inside this container can modify the
+    # HOST's firewall rules and cut off legitimate traffic -- including your
+    # own access to this machine. Only switch to --auto-block-live
+    # deliberately, after reading README.md "Automatic Blocking" (note the
+    # image doesn't ship iptables, so live mode would also need it added).
+    # ##########################################################################
+    command:
+      - sh
+      - -c
+      - 'exec python main.py --web --auto-block-dry-run $${NETSENTRY_INTERFACES:+--interface $$NETSENTRY_INTERFACES}'
+
+    volumes:
+      - ./data:/app/data          # database, ML model, JA3 blocklist
+      - ./captures:/app/captures  # PCAP exports
+      - ./logs:/app/logs          # log files
+      - ./config.yaml:/app/config.yaml:ro
+
+    restart: unless-stopped

@@ -27,6 +27,7 @@ import argparse
 import logging
 import sys
 import threading
+from pathlib import Path
 from typing import List, Optional
 
 from src.auto_block import AutoBlocker
@@ -209,6 +210,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "Auto-block is enabled in LIVE mode -- firewall rules WILL be applied to block source IPs."
             )
 
+    # sqlite won't create missing folders itself -- e.g. data/ on a fresh,
+    # empty Docker bind mount (logs/ and captures/ already handle this in
+    # setup_logging / PcapExporter)
+    Path(config.database.path).parent.mkdir(parents=True, exist_ok=True)
     database = Database(config.database.path)
 
     if args.web_only:

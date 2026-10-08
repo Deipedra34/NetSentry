@@ -1,0 +1,34 @@
+# --- VCS ---
+.git
+.gitignore
+.gitattributes
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# --- Tests (not run inside the image) ---
+tests/
+
+# --- NetSentry runtime artifacts (bind-mounted at runtime instead) ---
+*.db
+*.log
+captures/
+logs/
+data/*.mmdb
+data/*.joblib
+
+# --- Secrets ---
+.env
+.env.*
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

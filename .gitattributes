@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts run inside the Linux container, so keep them LF even on a
+# Windows checkout (core.autocrlf would otherwise break the shebang)
+*.sh text eol=lf

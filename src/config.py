@@ -9,6 +9,7 @@ giant yaml file around just to tweak one threshold.
 from __future__ import annotations
 
 import copy
+import os
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List
@@ -335,12 +336,32 @@ def _normalize_interfaces(config: Config) -> None:
         config.interfaces = [config.interfaces]
 
 
+# env vars that override a single config value after config.yaml is merged
+# in. Mostly for the Docker image, where config.yaml is mounted read-only
+# but the container still needs the dashboard on 0.0.0.0 and the db/log
+# inside the bind-mounted data/ and logs/ folders (see Dockerfile).
+_ENV_OVERRIDES = {
+    "NETSENTRY_WEB_HOST": ("web", "host"),
+    "NETSENTRY_DATABASE_PATH": ("database", "path"),
+    "NETSENTRY_LOG_FILE": ("logging", "file"),
+}
+
+
+def _apply_env_overrides(config: Config) -> None:
+    """Applies any _ENV_OVERRIDES that are set (and not empty)."""
+    for env_var, (section, key) in _ENV_OVERRIDES.items():
+        value = os.environ.get(env_var)
+        if value:
+            setattr(getattr(config, section), key, value)
+
+
 def load_config(path: str | Path | None) -> Config:
     """Loads config from the yaml file at `path`, defaults for anything
     that's missing. If path is None or just doesn't exist we don't error out,
     we just hand back the defaults -- makes it easy to run without a config
-    file at all. Only raises if the file's there but isn't a proper yaml
-    mapping (e.g. someone put a list at the top level, whatever).
+    file at all. NETSENTRY_* env vars (see _ENV_OVERRIDES) win over both
+    the file and the defaults. Only raises if the file's there but isn't a
+    proper yaml mapping (e.g. someone put a list at the top level, whatever).
     """
     config = Config()
     if path is not None:
@@ -355,4 +376,5 @@ def load_config(path: str | Path | None) -> Config:
             config = _merge_dataclass(config, copy.deepcopy(raw))
 
     _normalize_interfaces(config)
+    _apply_env_overrides(config)
     return config

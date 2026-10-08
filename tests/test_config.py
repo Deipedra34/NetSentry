@@ -86,3 +86,24 @@ def test_interface_list_is_passed_through(tmp_path: Path) -> None:
     )
     config = load_config(config_file)
     assert config.interfaces == ["eth0", "wlan0"]
+
+
+def test_env_vars_override_config_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "web:\n  host: 127.0.0.1\ndatabase:\n  path: netsentry.db\nlogging:\n  file: netsentry.log\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("NETSENTRY_WEB_HOST", "0.0.0.0")
+    monkeypatch.setenv("NETSENTRY_DATABASE_PATH", "data/netsentry.db")
+    monkeypatch.setenv("NETSENTRY_LOG_FILE", "logs/netsentry.log")
+    config = load_config(config_file)
+    assert config.web.host == "0.0.0.0"
+    assert config.database.path == "data/netsentry.db"
+    assert config.logging.file == "logs/netsentry.log"
+
+
+def test_empty_env_vars_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NETSENTRY_WEB_HOST", "")
+    config = load_config(None)
+    assert config.web.host == "127.0.0.1"
