@@ -135,6 +135,51 @@ class MlAnomalyConfig:
 
 
 @dataclass
+class BruteForceConfig:
+    """Thresholds for brute-force login attempt detection -- see
+    src/detectors.py (BruteForceDetector).
+
+    Only counts new TCP connection attempts (SYN without ACK) to the
+    login-related ports below, never every packet of an established
+    session, so one long legitimate SSH/RDP session can't look like an
+    attack.
+    """
+
+    enabled: bool = True
+    # service name -> destination port(s) whose connection attempts count as
+    # login attempts. Setting this in config.yaml replaces the whole mapping.
+    monitored_ports: Dict[str, List[int]] = field(
+        default_factory=lambda: {
+            "SSH": [22],
+            "RDP": [3389],
+            "FTP": [21],
+            "Telnet": [23],
+            "SMB": [445],
+            "MySQL": [3306],
+            "PostgreSQL": [5432],
+            "VNC": [5900],
+        }
+    )
+    # web logins live on the same ports as all other web traffic (every page
+    # load opens fresh connections), so they're off unless switched on here
+    monitor_http: bool = False
+    http_ports: Dict[str, List[int]] = field(
+        default_factory=lambda: {"HTTP": [80, 8080], "HTTPS": [443]}
+    )
+    # new connection attempts from one source IP to one destination
+    # host:port within window_seconds that trigger a single-target alert
+    max_attempts: int = 10
+    window_seconds: int = 60
+    # service name -> max_attempts override for that service, e.g. {"RDP": 5}
+    per_service_thresholds: Dict[str, int] = field(default_factory=dict)
+    # attempts from one source IP across *all* monitored hosts/services
+    # within window_seconds that trigger a multi-target (spraying) alert
+    multi_target_threshold: int = 20
+    # seconds to wait before re-alerting on the same source IP
+    cooldown: float = 60.0
+
+
+@dataclass
 class DatabaseConfig:
     """SQLite event database settings."""
 
@@ -297,6 +342,7 @@ class Config:
     dns_tunnel: DnsTunnelConfig = field(default_factory=DnsTunnelConfig)
     tls_anomaly: TlsAnomalyConfig = field(default_factory=TlsAnomalyConfig)
     ml_anomaly: MlAnomalyConfig = field(default_factory=MlAnomalyConfig)
+    brute_force: BruteForceConfig = field(default_factory=BruteForceConfig)
     # source IPs/CIDR ranges that skip detection entirely, see src/engine.py
     whitelist: List[str] = field(default_factory=list)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)

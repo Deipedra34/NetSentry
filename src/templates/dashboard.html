@@ -113,6 +113,7 @@
   .badge.ARP_SPOOF { background: rgba(240,169,60,0.15); color: var(--warn); }
   .badge.SYN_FLOOD { background: rgba(239,91,91,0.15); color: var(--danger); }
   .badge.TRAFFIC_ANOMALY { background: rgba(79,209,197,0.15); color: var(--accent); }
+  .badge.BRUTE_FORCE { background: rgba(255,209,102,0.15); color: #ffd166; }
   .charts-header {
     display: flex;
     align-items: center;
@@ -313,6 +314,7 @@ const TYPE_COLORS = {
   DNS_TUNNEL: "#b48ef0",
   TLS_ANOMALY: "#e879b9",
   ML_ANOMALY: "#9ccc65",
+  BRUTE_FORCE: "#ffd166",
 };
 const css = getComputedStyle(document.documentElement);
 const MUTED = css.getPropertyValue("--muted").trim();

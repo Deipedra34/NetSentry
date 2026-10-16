@@ -16,6 +16,7 @@ from src.config import Config
 from src.database import Database
 from src.detectors import (
     ArpSpoofDetector,
+    BruteForceDetector,
     Detector,
     DNSTunnelDetector,
     DosDetector,
@@ -40,6 +41,7 @@ DETECTOR_NAMES = (
     "dns_tunnel",
     "tls_anomaly",
     "ml_anomaly",
+    "brute_force",
 )
 
 
@@ -124,6 +126,21 @@ def build_detectors(config: Config, enabled: List[str] | None = None) -> List[De
                 anomaly_score_threshold=config.ml_anomaly.anomaly_score_threshold,
                 feature_window_seconds=config.ml_anomaly.feature_window_seconds,
                 cooldown=config.ml_anomaly.cooldown,
+            )
+        )
+    if wants("brute_force", config.brute_force.enabled):
+        # web login ports only join the monitored set when explicitly asked
+        monitored_ports = dict(config.brute_force.monitored_ports)
+        if config.brute_force.monitor_http:
+            monitored_ports.update(config.brute_force.http_ports)
+        detectors.append(
+            BruteForceDetector(
+                monitored_ports=monitored_ports,
+                max_attempts=config.brute_force.max_attempts,
+                window_seconds=config.brute_force.window_seconds,
+                per_service_thresholds=config.brute_force.per_service_thresholds,
+                multi_target_threshold=config.brute_force.multi_target_threshold,
+                cooldown=config.brute_force.cooldown,
             )
         )
 

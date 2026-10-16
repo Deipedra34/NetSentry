@@ -21,7 +21,7 @@ database, and surfaces them on a self-refreshing Flask dashboard.
 
 ## Features
 
-NetSentry ships with seven independent detectors, each individually
+NetSentry ships with eight independent detectors, each individually
 configurable and individually toggleable:
 
 | Detector | What it catches | Signal |
@@ -33,6 +33,7 @@ configurable and individually toggleable:
 | **DNS Tunneling** | Data exfiltration / C2 hidden inside DNS queries | Long or high-entropy subdomains, an excessive per-IP query rate, and/or tunneling-friendly record types (TXT/NULL/CNAME) |
 | **TLS/HTTPS Anomaly** | Malware/C2 traffic hidden inside TLS handshakes | A client JA3 fingerprint on a known-malicious blocklist, and/or a server certificate that's self-signed, expired, short-lived, or very recently issued |
 | **ML Anomaly Detection** | Traffic patterns that don't fit any fixed threshold | An Isolation Forest / Random Forest model trained on your own captured traffic scores each source IP's packet rate, port/IP fan-out, packet size, protocol mix, and SYN ratio; **opt-in, disabled by default** -- needs a trained model first, see below |
+| **Brute-Force Login Attempts** | Password guessing against SSH, RDP, FTP, Telnet, SMB, MySQL, PostgreSQL, VNC (and optionally HTTP/HTTPS) | ≥ *N* new TCP connection attempts (SYN only) from one source IP to one host:port within *T* seconds, or to many hosts/services at once (credential spraying) |
 
 Every detected event is persisted with a timestamp, source IP, event type,
 and a human-readable details string, and is immediately visible on the live
@@ -58,6 +59,7 @@ flowchart LR
         DNS["DNSTunnelDetector"]
         TLS["TLSAnomalyDetector"]
         ML["MLAnomalyDetector"]
+        BF["BruteForceDetector"]
     end
 
     Engine --> PS
@@ -67,6 +69,7 @@ flowchart LR
     Engine --> DNS
     Engine --> TLS
     Engine --> ML
+    Engine --> BF
 
     PS -->|"Event"| DB[("SQLite\nnetsentry.db")]
     ARP -->|"Event"| DB
@@ -75,6 +78,7 @@ flowchart LR
     DNS -->|"Event"| DB
     TLS -->|"Event"| DB
     ML -->|"Event"| DB
+    BF -->|"Event"| DB
 
     Model[("data/ml_model.joblib\n(trained offline)")] -.loaded at startup.-> ML
     Train["scripts/train_ml_model.py"] -.saves.-> Model
@@ -131,7 +135,7 @@ netsentry/
 │   ├── engine.py                 # Wires detectors + database together
 │   ├── database.py               # SQLite event storage
 │   ├── logging_config.py         # Console + rotating file logging
-│   ├── detectors.py              # Detector interface + all seven detectors
+│   ├── detectors.py              # Detector interface + all eight detectors
 │   ├── tls_parser.py             # Minimal TLS handshake parsing (JA3 + certs)
 │   ├── ml_features.py            # Per-source-IP traffic feature extraction
 │   ├── notifications.py          # Discord / Telegram / email alert dispatch
@@ -152,6 +156,7 @@ netsentry/
     ├── test_dns_tunnel.py
     ├── test_tls_anomaly.py
     ├── test_ml_anomaly.py
+    ├── test_brute_force.py
     ├── test_database.py
     ├── test_config.py
     ├── test_sniffer.py
@@ -469,7 +474,7 @@ sudo python main.py -i eth0 --detectors port_scan,dos
 ```
 
 Valid detector names: `port_scan`, `arp_spoof`, `dos`, `traffic_anomaly`,
-`dns_tunnel`, `tls_anomaly`.
+`dns_tunnel`, `tls_anomaly`, `brute_force`.
 
 ### Browse an existing database without capturing
 
@@ -604,7 +609,8 @@ A debug-level log line is emitted each time a packet is skipped this way.
 ## Notifications
 
 NetSentry can push critical alerts (SYN flood, ARP spoofing, traffic
-anomalies, port scans, DNS tunneling, and TLS anomalies) out to Discord,
+anomalies, port scans, DNS tunneling, TLS anomalies, and brute-force login
+attempts) out to Discord,
 Telegram, and/or email as they happen, in addition to logging them and
 writing them to the dashboard. All
 three channels are independently configurable under `notifications` in
@@ -661,7 +667,7 @@ notifications:
 
 NetSentry can automatically save the raw traffic around a critical event
 (SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling, TLS
-anomalies) to a `.pcap` file, so you have the actual packets to dig into
+anomalies, brute-force login attempts) to a `.pcap` file, so you have the actual packets to dig into
 later instead of just the one-line alert. It's configured under `pcap_export` in `config.yaml` and
 disabled by default — see the commented example already in the shipped
 `config.yaml`.
@@ -709,8 +715,8 @@ the default `.pcap` handler), or from the command line with `tcpdump -r` /
 > care about.
 
 NetSentry can automatically block the source IP behind a critical event
-(SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling, or
-TLS anomalies, same as notifications/PCAP export) at the OS firewall level,
+(SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling, TLS
+anomalies, or brute-force login attempts, same as notifications/PCAP export) at the OS firewall level,
 via `AutoBlocker` in `src/auto_block.py`. It's configured under `auto_block` in `config.yaml` and
 disabled by default — see the commented example already in the shipped
 `config.yaml`.
@@ -719,7 +725,8 @@ disabled by default — see the commented example already in the shipped
 
 1. `auto_block.enabled` must be `true`.
 2. The event's type must meet or exceed `auto_block.min_severity`
-   (`low` / `medium` / `high` / `critical` — port scans are `low`, traffic
+   (`low` / `medium` / `high` / `critical` — port scans and brute-force
+   login attempts are `low`, traffic
    anomalies `medium`, ARP spoofing, DNS tunneling, and TLS anomalies
    `high`, SYN floods `critical`).
 3. The source IP must **not** be on the `whitelist` — this is a hard rule,
@@ -1047,6 +1054,82 @@ example already in the shipped file.
 
 ---
 
+## Brute-Force Detection
+
+Password-guessing attacks against remote login services — SSH, RDP, FTP,
+Telnet, SMB, databases, VNC — show up on the wire as one source IP opening
+connection after connection to the same login port. NetSentry's
+`BruteForceDetector` (`src/detectors.py`) watches for exactly that and
+raises a `BRUTE_FORCE` event that flows through notifications, PCAP export,
+threat intelligence enrichment, the whitelist, auto-block, and the dashboard
+charts exactly like every other detector.
+
+It looks for two patterns within a sliding `window_seconds` window:
+
+- **Single-target** — one source IP making too many attempts against one
+  host:port, e.g.
+  `SSH brute force: 34 attempts to 192.168.1.10:22 in 60s (threshold: 10); pattern: single-target`.
+- **Multi-target** — one source IP spreading its attempts across many hosts
+  and/or services, each target staying under the per-target threshold on
+  purpose (credential spraying, or lateral movement after a foothold), e.g.
+  `SSH/SMB brute force: 22 attempts across 9 targets in 60s (threshold: 20); pattern: multi-target; targets: ...`.
+
+A per-source `cooldown` keeps a sustained attack to one alert per interval.
+
+**Why only SYN packets count.** Only *new* TCP connection attempts are
+counted: packets with the SYN flag set and ACK not set, sent to a monitored
+destination port. Established-session traffic (ACK set) never counts. Most
+brute-force tools open a fresh connection for every guess (or every few
+guesses), while a legitimate user opens one connection and keeps using it.
+If every packet counted, a single long SSH or RDP session would look like an
+attack within seconds.
+
+Settings (under `brute_force` in `config.yaml`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Turn the detector on/off. |
+| `monitored_ports` | SSH 22, RDP 3389, FTP 21, Telnet 23, SMB 445, MySQL 3306, PostgreSQL 5432, VNC 5900 | Service name → port(s) whose connection attempts count as login attempts. The service name is what appears in alerts. Setting this key replaces the whole mapping, so list every service you want monitored. |
+| `monitor_http` | `false` | Also monitor the web login ports in `http_ports`. Off by default: every ordinary page load opens fresh connections to the same ports, so web traffic is very noisy here. |
+| `http_ports` | HTTP 80/8080, HTTPS 443 | Web ports to monitor when `monitor_http` is `true`. |
+| `max_attempts` | `10` | New connection attempts from one source IP to one host:port within the window that trigger a single-target alert. |
+| `window_seconds` | `60` | Length of the sliding window, in seconds. |
+| `per_service_thresholds` | `{}` | Per-service override for `max_attempts`, keyed by service name (case-insensitive), e.g. `{RDP: 5, HTTP: 50}`. |
+| `multi_target_threshold` | `20` | Attempts from one source IP across *all* monitored hosts/services within the window that trigger a multi-target alert (needs at least two distinct targets). |
+| `cooldown` | `60` | Seconds to wait before re-alerting on the same source IP. |
+
+To keep memory bounded under a flood of spoofed source IPs, the detector
+tracks at most 10,000 keys per table and drops the least recently active one
+first once that cap is reached.
+
+**Tuning guidance.**
+
+- **Servers that legitimately get many short connections** — Git over SSH,
+  CI runners, monitoring/backup jobs, application servers with no connection
+  pooling against MySQL/PostgreSQL — will trip the defaults. Raise
+  `max_attempts` (or just that service's entry in `per_service_thresholds`),
+  or add the known clients to the `whitelist`.
+- **Keep sensitive services strict.** RDP and VNC rarely see bursts of
+  legitimate connections, so a lower per-service threshold (e.g. `RDP: 5`)
+  catches attacks sooner without much extra noise.
+- **Leave `monitor_http` off unless you know your baseline.** Browsers open
+  several parallel connections per page, so normal browsing easily crosses
+  10 connections a minute to port 443. If you do enable it, give `HTTP`/
+  `HTTPS` much higher `per_service_thresholds` and watch the alerts for a
+  while first.
+- **Multi-target alerts** can come from legitimate scanners, inventory or
+  monitoring tools that touch many hosts. Whitelist those hosts rather than
+  raising `multi_target_threshold` for everyone.
+
+**Limitation.** NetSentry inspects packet headers only, never payloads, so
+this detector counts *connection attempts*. It cannot see whether a login
+actually failed. A burst of successful logins (or a client that reconnects
+aggressively) looks the same as a burst of failed ones. For confirmed failed
+logins, correlate with the service's own logs (e.g. `auth.log` for SSH, the
+Windows Security log's event 4625 for RDP/SMB).
+
+---
+
 ## Testing
 
 The full test suite runs entirely offline against synthetic packet data —
@@ -1072,7 +1155,7 @@ points, no real training run) rather than depending on
 
 ## How each detector works
 
-All seven live in `src/detectors.py`:
+All eight live in `src/detectors.py`:
 
 - **Port Scan** (`PortScanDetector`): maintains a per-source-IP map of
   `{port: last_seen_timestamp}`, prunes entries older than the configured
@@ -1108,6 +1191,13 @@ All seven live in `src/detectors.py`:
   loaded. See
   [Machine Learning Anomaly Detection](#machine-learning-anomaly-detection)
   for training and tuning.
+- **Brute-Force Login Attempts** (`BruteForceDetector`): counts only new
+  TCP connection attempts (SYN without ACK) to monitored login ports, in
+  per-(source IP, destination IP, port) and per-source-IP sliding-window
+  deques; alerts when one target crosses `max_attempts` (single-target)
+  or the source's attempts across all targets cross
+  `multi_target_threshold` (multi-target). See
+  [Brute-Force Detection](#brute-force-detection) for tuning.
 
 All detectors implement per-source cooldowns so a sustained attack produces
 one alert per cooldown period rather than one per packet.

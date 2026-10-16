@@ -122,6 +122,47 @@ ml_anomaly:
 #   feature_window_seconds: 10
 #   cooldown: 60
 
+# Brute-force login attempt detection: a single source IP opening many new
+# TCP connections (SYN only, never established-session traffic) to
+# login-related service ports in a short window -- either hammering one
+# host:port, or spraying attempts across many hosts/services. Headers only,
+# so it counts connection attempts, not confirmed failed logins. See
+# README.md "Brute-Force Detection".
+brute_force:
+  enabled: true
+  monitored_ports: # service name -> port(s); setting this replaces the whole list
+    SSH: [22]
+    RDP: [3389]
+    FTP: [21]
+    Telnet: [23]
+    SMB: [445]
+    MySQL: [3306]
+    PostgreSQL: [5432]
+    VNC: [5900]
+  monitor_http: false # web logins share ports with all other web traffic -- very noisy
+  http_ports: # only monitored when monitor_http is true
+    HTTP: [80, 8080]
+    HTTPS: [443]
+  max_attempts: 10 # attempts from one source IP to one host:port within the window
+  window_seconds: 60
+  per_service_thresholds: {} # service name -> max_attempts override, e.g. {RDP: 5}
+  multi_target_threshold: 20 # attempts from one source IP across all monitored targets
+  cooldown: 60 # seconds to wait before re-alerting on the same source IP
+
+# Example brute_force block for a server that legitimately receives lots of
+# short connections (e.g. a Git-over-SSH host or a busy database) -- raise
+# the per-target threshold, keep RDP strict, and leave web logins off:
+# brute_force:
+#   enabled: true
+#   max_attempts: 30
+#   window_seconds: 60
+#   per_service_thresholds:
+#     RDP: 5
+#     SSH: 50
+#   multi_target_threshold: 40
+#   monitor_http: false
+#   cooldown: 120
+
 # IP whitelist: packets whose source IP matches an entry here skip detection
 # entirely. Entries can be exact IPs or CIDR ranges.
 # whitelist:

@@ -29,7 +29,9 @@ logger = logging.getLogger("netsentry.notifications")
 # exfiltration / C2, TLS anomalies (blocklisted JA3 fingerprints, suspicious
 # certificates) point at the same thing over HTTPS, and ML anomalies flag
 # traffic patterns the model wasn't trained on -- a statistical cousin of
-# TRAFFIC_ANOMALY, so it's ranked the same.
+# TRAFFIC_ANOMALY, so it's ranked the same. Brute-force login attempts are
+# treated like port scans: headers only, so it's repeated connection
+# attempts, not confirmed failed logins.
 CRITICAL_EVENT_TYPES = {
     "SYN_FLOOD",
     "ARP_SPOOF",
@@ -38,6 +40,7 @@ CRITICAL_EVENT_TYPES = {
     "DNS_TUNNEL",
     "TLS_ANOMALY",
     "ML_ANOMALY",
+    "BRUTE_FORCE",
 }
 
 # Relative ranking within CRITICAL_EVENT_TYPES, low to high -- formalizes the
@@ -47,6 +50,7 @@ CRITICAL_EVENT_TYPES = {
 SEVERITY_LEVELS = ["low", "medium", "high", "critical"]
 EVENT_SEVERITY: Dict[str, str] = {
     "PORT_SCAN": "low",
+    "BRUTE_FORCE": "low",
     "TRAFFIC_ANOMALY": "medium",
     "ML_ANOMALY": "medium",
     "ARP_SPOOF": "high",

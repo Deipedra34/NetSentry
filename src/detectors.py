@@ -14,7 +14,7 @@ import math
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict, deque
 from pathlib import Path
-from typing import Any, Deque, Dict, FrozenSet, List, Optional
+from typing import Any, Deque, Dict, FrozenSet, List, Optional, Tuple
 
 import joblib
 
@@ -34,6 +34,7 @@ __all__ = [
     "DNSTunnelDetector",
     "TLSAnomalyDetector",
     "MLAnomalyDetector",
+    "BruteForceDetector",
 ]
 
 
@@ -774,3 +775,158 @@ class MLAnomalyDetector(Detector):
             f"Anomalous traffic pattern (score {score:.3f}, threshold "
             f"{self.anomaly_score_threshold:.3f}); raw features: {raw}"
         )
+
+
+class BruteForceDetector(Detector):
+    """Flags repeated login attempts against SSH, RDP, SMB and friends.
+
+    Counts *new* TCP connection attempts only (SYN set, ACK not) to the
+    monitored login ports -- password-guessing tools open a fresh connection
+    for every guess (or every handful), while a legit user opens one and
+    keeps using it, so counting every packet would make one long session
+    look like an attack. Two patterns are checked in a sliding
+    `window_seconds` window:
+
+      1. single-target: one source IP hammering one host:port past
+         `max_attempts` (or that service's `per_service_thresholds` entry)
+      2. multi-target: one source IP spreading attempts across several
+         hosts/services past `multi_target_threshold` in total -- credential
+         spraying / lateral movement, which deliberately stays under the
+         per-target threshold
+
+    NetSentry only sees headers, so this counts connection attempts -- it
+    can't tell whether a login actually failed.
+    """
+
+    name = "BRUTE_FORCE"
+
+    # same defaults as BruteForceConfig.monitored_ports in src/config.py
+    DEFAULT_MONITORED_PORTS: Dict[str, List[int]] = {
+        "SSH": [22],
+        "RDP": [3389],
+        "FTP": [21],
+        "Telnet": [23],
+        "SMB": [445],
+        "MySQL": [3306],
+        "PostgreSQL": [5432],
+        "VNC": [5900],
+    }
+    # cap on tracked (src, dst, port) keys / source IPs / cooldown entries,
+    # so a flood of spoofed source IPs can't grow memory without bound --
+    # once it's hit, the least recently active key gets dropped first
+    MAX_TRACKED_KEYS = 10_000
+    # cap on timestamps kept per key; counts saturate here, which is far
+    # above any sane threshold
+    MAX_ATTEMPTS_PER_KEY = 10_000
+    # how many targets a multi-target alert lists before truncating
+    MAX_LISTED_TARGETS = 10
+
+    def __init__(
+        self,
+        monitored_ports: Optional[Dict[str, Any]] = None,
+        max_attempts: int = 10,
+        window_seconds: float = 60.0,
+        per_service_thresholds: Optional[Dict[str, int]] = None,
+        multi_target_threshold: int = 20,
+        cooldown: float = 60.0,
+    ) -> None:
+        # monitored_ports maps service name -> port or list of ports
+        self.max_attempts = max_attempts
+        self.window_seconds = window_seconds
+        self.multi_target_threshold = multi_target_threshold
+        self.cooldown = cooldown
+        # dst_port -> service name
+        self._services: Dict[int, str] = {}
+        for service, ports in (
+            monitored_ports if monitored_ports is not None else self.DEFAULT_MONITORED_PORTS
+        ).items():
+            for port in [ports] if isinstance(ports, int) else ports:
+                self._services[int(port)] = service
+        # lowercased service name -> threshold, so "rdp" and "RDP" both work
+        self._thresholds: Dict[str, int] = {
+            service.lower(): int(limit)
+            for service, limit in (per_service_thresholds or {}).items()
+        }
+        # (src_ip, dst_ip, dst_port) -> deque of attempt timestamps
+        self._attempts: Dict[Tuple[str, str, int], Deque[float]] = {}
+        # src_ip -> deque of (timestamp, (dst_ip, dst_port), service) across
+        # every monitored target, for the multi-target pattern
+        self._source_attempts: Dict[str, Deque[Tuple[float, Tuple[str, int], str]]] = {}
+        self._last_alert: Dict[str, float] = {}
+
+    def _touch(self, store: Dict[Any, Deque[Any]], key: Any) -> Deque[Any]:
+        """store[key], created if missing. Re-inserts the key so dict order
+        doubles as least-recently-active-first, and evicts the oldest key
+        once store is at MAX_TRACKED_KEYS."""
+        entries = store.pop(key, None)
+        if entries is None:
+            if len(store) >= self.MAX_TRACKED_KEYS:
+                del store[next(iter(store))]
+            entries = deque(maxlen=self.MAX_ATTEMPTS_PER_KEY)
+        store[key] = entries
+        return entries
+
+    def process_packet(self, packet: PacketInfo) -> List[Event]:
+        """Records a connection attempt to a monitored login port and checks
+        both the single-target and multi-target thresholds."""
+        if not packet.src_ip or not packet.dst_ip or packet.protocol != "TCP":
+            return []
+        if not packet.is_syn or packet.dst_port is None:
+            return []
+        service = self._services.get(packet.dst_port)
+        if service is None:
+            return []
+
+        now = packet.timestamp
+        cutoff = now - self.window_seconds
+        target = (packet.dst_ip, packet.dst_port)
+
+        attempts = self._touch(self._attempts, (packet.src_ip, *target))
+        attempts.append(now)
+        while attempts and attempts[0] < cutoff:
+            attempts.popleft()
+
+        source_attempts = self._touch(self._source_attempts, packet.src_ip)
+        source_attempts.append((now, target, service))
+        while source_attempts and source_attempts[0][0] < cutoff:
+            source_attempts.popleft()
+
+        threshold = self._thresholds.get(service.lower(), self.max_attempts)
+        targets = {t for _, t, _ in source_attempts}
+        if len(attempts) >= threshold:
+            details = (
+                f"{service} brute force: {len(attempts)} attempts to "
+                f"{packet.dst_ip}:{packet.dst_port} in {self.window_seconds:.0f}s "
+                f"(threshold: {threshold}); pattern: single-target"
+            )
+        elif len(targets) >= 2 and len(source_attempts) >= self.multi_target_threshold:
+            services = sorted({s for _, _, s in source_attempts})
+            listed = sorted(targets)[: self.MAX_LISTED_TARGETS]
+            target_list = ", ".join(f"{ip}:{port}" for ip, port in listed)
+            if len(targets) > len(listed):
+                target_list += ", ..."
+            details = (
+                f"{'/'.join(services)} brute force: {len(source_attempts)} attempts "
+                f"across {len(targets)} targets in {self.window_seconds:.0f}s "
+                f"(threshold: {self.multi_target_threshold}); pattern: multi-target; "
+                f"targets: {target_list}"
+            )
+        else:
+            return []
+
+        last_alert = self._last_alert.get(packet.src_ip, float("-inf"))
+        if now - last_alert < self.cooldown:
+            return []
+
+        self._last_alert.pop(packet.src_ip, None)
+        if len(self._last_alert) >= self.MAX_TRACKED_KEYS:
+            del self._last_alert[next(iter(self._last_alert))]
+        self._last_alert[packet.src_ip] = now
+        return [
+            Event(
+                event_type=self.name,
+                source_ip=packet.src_ip,
+                details=details,
+                timestamp=to_datetime(now),
+            )
+        ]
