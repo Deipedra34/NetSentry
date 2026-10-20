@@ -31,7 +31,9 @@ logger = logging.getLogger("netsentry.notifications")
 # traffic patterns the model wasn't trained on -- a statistical cousin of
 # TRAFFIC_ANOMALY, so it's ranked the same. Brute-force login attempts are
 # treated like port scans: headers only, so it's repeated connection
-# attempts, not confirmed failed logins.
+# attempts, not confirmed failed logins. ICMP floods and ping sweeps are
+# treated like port scans too; oversized pings (ICMP_OVERSIZED) aren't
+# critical at all -- a single big ping is often just a path-MTU test.
 CRITICAL_EVENT_TYPES = {
     "SYN_FLOOD",
     "ARP_SPOOF",
@@ -41,6 +43,8 @@ CRITICAL_EVENT_TYPES = {
     "TLS_ANOMALY",
     "ML_ANOMALY",
     "BRUTE_FORCE",
+    "ICMP_FLOOD",
+    "PING_SWEEP",
 }
 
 # Relative ranking within CRITICAL_EVENT_TYPES, low to high -- formalizes the
@@ -51,6 +55,8 @@ SEVERITY_LEVELS = ["low", "medium", "high", "critical"]
 EVENT_SEVERITY: Dict[str, str] = {
     "PORT_SCAN": "low",
     "BRUTE_FORCE": "low",
+    "ICMP_FLOOD": "low",
+    "PING_SWEEP": "low",
     "TRAFFIC_ANOMALY": "medium",
     "ML_ANOMALY": "medium",
     "ARP_SPOOF": "high",

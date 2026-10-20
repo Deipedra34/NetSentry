@@ -14,7 +14,7 @@ import math
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict, deque
 from pathlib import Path
-from typing import Any, Deque, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, FrozenSet, List, Optional, Tuple
 
 import joblib
 
@@ -35,6 +35,7 @@ __all__ = [
     "TLSAnomalyDetector",
     "MLAnomalyDetector",
     "BruteForceDetector",
+    "ICMPDetector",
 ]
 
 
@@ -930,3 +931,164 @@ class BruteForceDetector(Detector):
                 timestamp=to_datetime(now),
             )
         ]
+
+
+class ICMPDetector(Detector):
+    """Flags ICMP floods, ping sweeps and oversized pings.
+
+    Only ICMP echo requests (type 8) are looked at -- echo replies and error
+    messages (destination unreachable, time exceeded, ...) are what a busy
+    host sends *back*, so counting them would flag the victim instead of the
+    sender. Three independent checks, each raising its own event type:
+
+      1. ICMP_FLOOD: one source IP sending `flood_max_packets` echo requests
+         within `flood_window_seconds`
+      2. PING_SWEEP: one source IP pinging `sweep_max_hosts` distinct
+         destination IPs within `sweep_window_seconds` -- host discovery,
+         the usual first step of network reconnaissance
+      3. ICMP_OVERSIZED: a single echo request bigger than
+         `large_packet_bytes` -- ping-of-death style packets, or data being
+         smuggled through ICMP tunneling (only when `flag_large_packets`)
+
+    Cooldowns are tracked per (source IP, event type), so an ongoing flood
+    doesn't hide a sweep from the same source.
+    """
+
+    # this detector raises the three event types below rather than `name`,
+    # which is just what the engine calls it in logs
+    name = "ICMP"
+    FLOOD_EVENT = "ICMP_FLOOD"
+    SWEEP_EVENT = "PING_SWEEP"
+    OVERSIZED_EVENT = "ICMP_OVERSIZED"
+
+    ECHO_REQUEST = 8
+    # same memory caps as BruteForceDetector: tracked source IPs (and
+    # cooldown entries) are capped, dropping the least recently active one
+    # first, so a spoofed-source flood can't grow memory without bound...
+    MAX_TRACKED_SOURCES = 10_000
+    # ...and so are the timestamps / destination hosts kept per source
+    MAX_PACKETS_PER_SOURCE = 10_000
+    MAX_HOSTS_PER_SOURCE = 1_000
+    # how many hosts a sweep alert lists
+    MAX_LISTED_HOSTS = 10
+
+    def __init__(
+        self,
+        flood_max_packets: int = 100,
+        flood_window_seconds: float = 10.0,
+        sweep_max_hosts: int = 15,
+        sweep_window_seconds: float = 30.0,
+        flag_large_packets: bool = True,
+        large_packet_bytes: int = 1000,
+        cooldown: float = 60.0,
+    ) -> None:
+        self.flood_max_packets = flood_max_packets
+        self.flood_window_seconds = flood_window_seconds
+        self.sweep_max_hosts = sweep_max_hosts
+        self.sweep_window_seconds = sweep_window_seconds
+        self.flag_large_packets = flag_large_packets
+        self.large_packet_bytes = large_packet_bytes
+        self.cooldown = cooldown
+        # per-source caps never go below the thresholds, or nothing could fire
+        self._max_packets = max(self.MAX_PACKETS_PER_SOURCE, flood_max_packets)
+        self._max_hosts = max(self.MAX_HOSTS_PER_SOURCE, sweep_max_hosts)
+        # src_ip -> deque of echo request timestamps (flood)
+        self._echo_times: Dict[str, Deque[float]] = {}
+        # src_ip -> {dst_ip: last_seen_timestamp}, oldest first (sweep)
+        self._hosts_by_ip: Dict[str, Dict[str, float]] = {}
+        # (src_ip, event_type) -> last alert timestamp
+        self._last_alert: Dict[Tuple[str, str], float] = {}
+
+    def _touch(self, store: Dict[Any, Any], key: Any, factory: Callable[[], Any]) -> Any:
+        """store[key], created with factory() if missing. Re-inserts the key
+        so dict order doubles as least-recently-active-first, and evicts the
+        oldest key once store is at MAX_TRACKED_SOURCES."""
+        entries = store.pop(key, None)
+        if entries is None:
+            if len(store) >= self.MAX_TRACKED_SOURCES:
+                del store[next(iter(store))]
+            entries = factory()
+        store[key] = entries
+        return entries
+
+    def _alert(self, packet: PacketInfo, event_type: str, details: str) -> List[Event]:
+        """One event for packet.src_ip, unless that IP is still on cooldown
+        for this event_type."""
+        key = (packet.src_ip, event_type)
+        now = packet.timestamp
+        last_alert = self._last_alert.get(key, float("-inf"))
+        if now - last_alert < self.cooldown:
+            return []
+        self._last_alert.pop(key, None)
+        if len(self._last_alert) >= self.MAX_TRACKED_SOURCES:
+            del self._last_alert[next(iter(self._last_alert))]
+        self._last_alert[key] = now
+        return [
+            Event(
+                event_type=event_type,
+                source_ip=packet.src_ip,
+                details=details,
+                timestamp=to_datetime(now),
+            )
+        ]
+
+    def process_packet(self, packet: PacketInfo) -> List[Event]:
+        """Records an echo request and checks it against the flood, sweep
+        and oversized-packet thresholds -- can return more than one event."""
+        if not packet.src_ip or packet.protocol != "ICMP":
+            return []
+        if packet.icmp_type != self.ECHO_REQUEST:
+            return []
+
+        now = packet.timestamp
+        events: List[Event] = []
+
+        times = self._touch(
+            self._echo_times, packet.src_ip, lambda: deque(maxlen=self._max_packets)
+        )
+        times.append(now)
+        cutoff = now - self.flood_window_seconds
+        while times and times[0] < cutoff:
+            times.popleft()
+        if len(times) >= self.flood_max_packets:
+            rate = len(times) / self.flood_window_seconds
+            events += self._alert(
+                packet,
+                self.FLOOD_EVENT,
+                f"ICMP flood: {len(times)} echo requests in {self.flood_window_seconds:.0f}s "
+                f"(~{rate:.1f}/s, threshold: {self.flood_max_packets})",
+            )
+
+        if packet.dst_ip:
+            hosts = self._touch(self._hosts_by_ip, packet.src_ip, dict)
+            # re-insert so the dict stays ordered oldest-seen first, which
+            # lets expiry stop at the first host still inside the window
+            hosts.pop(packet.dst_ip, None)
+            hosts[packet.dst_ip] = now
+            cutoff = now - self.sweep_window_seconds
+            while hosts:
+                oldest = next(iter(hosts))
+                if hosts[oldest] >= cutoff:
+                    break
+                del hosts[oldest]
+            if len(hosts) > self._max_hosts:
+                del hosts[next(iter(hosts))]
+            if len(hosts) >= self.sweep_max_hosts:
+                recent = list(hosts)[-self.MAX_LISTED_HOSTS:]
+                events += self._alert(
+                    packet,
+                    self.SWEEP_EVENT,
+                    f"Ping sweep: {len(hosts)} distinct hosts probed in "
+                    f"{self.sweep_window_seconds:.0f}s (threshold: {self.sweep_max_hosts}); "
+                    f"recent hosts: {recent}",
+                )
+
+        if self.flag_large_packets and packet.length > self.large_packet_bytes:
+            events += self._alert(
+                packet,
+                self.OVERSIZED_EVENT,
+                f"Oversized ICMP echo request: {packet.length} bytes to {packet.dst_ip} "
+                f"(threshold: {self.large_packet_bytes} bytes)",
+            )
+
+        return events

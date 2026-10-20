@@ -12,7 +12,7 @@ import pytest
 scapy = pytest.importorskip("scapy.all")
 
 from scapy.layers.dns import DNS, DNSQR  # noqa: E402
-from scapy.layers.inet import IP, TCP, UDP  # noqa: E402
+from scapy.layers.inet import ICMP, IP, TCP, UDP  # noqa: E402
 from scapy.layers.l2 import ARP, Ether  # noqa: E402
 
 from src.sniffer import NetworkSniffer, parse_packet  # noqa: E402
@@ -42,6 +42,17 @@ def test_parse_udp_packet() -> None:
     assert info.protocol == "UDP"
     assert info.src_port == 53
     assert info.dst_port == 12345
+
+
+def test_parse_icmp_echo_request() -> None:
+    pkt = Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / ICMP(type=8, code=0) / (b"x" * 1400)
+    info = parse_packet(pkt)
+    assert info is not None
+    assert info.protocol == "ICMP"
+    assert info.icmp_type == 8
+    assert info.icmp_code == 0
+    assert info.src_port is None
+    assert info.length == len(pkt)
 
 
 def test_parse_dns_query_extracts_name_and_type() -> None:

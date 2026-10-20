@@ -163,6 +163,36 @@ brute_force:
 #   monitor_http: false
 #   cooldown: 120
 
+# ICMP flood / ping sweep detection: one source IP sending an abnormal
+# volume of ICMP echo requests (flood), pinging many distinct hosts (ping
+# sweep / network reconnaissance), or sending oversized echo requests
+# (ping-of-death style packets or ICMP tunneling). Only echo requests
+# (type 8) count -- never replies or ICMP error messages. See README.md
+# "ICMP Flood and Ping Sweep Detection".
+icmp:
+  enabled: true
+  flood_max_packets: 100 # echo requests from one source IP within the flood window
+  flood_window_seconds: 10
+  sweep_max_hosts: 15 # distinct destination IPs pinged by one source IP within the sweep window
+  sweep_window_seconds: 30
+  flag_large_packets: true # flag echo requests bigger than large_packet_bytes
+  large_packet_bytes: 1000 # captured frame size, headers included
+  cooldown: 60 # seconds before re-alerting on the same source IP (per event type)
+
+# Example icmp block for a network with a monitoring server (Nagios, Zabbix,
+# PRTG, ...) that pings lots of hosts every few seconds -- raise the sweep
+# threshold (and whitelist the monitoring server itself), and allow
+# path-MTU / jumbo-frame testing to use bigger pings:
+# icmp:
+#   enabled: true
+#   flood_max_packets: 200
+#   flood_window_seconds: 10
+#   sweep_max_hosts: 60
+#   sweep_window_seconds: 30
+#   flag_large_packets: true
+#   large_packet_bytes: 1600
+#   cooldown: 120
+
 # IP whitelist: packets whose source IP matches an entry here skip detection
 # entirely. Entries can be exact IPs or CIDR ranges.
 # whitelist:

@@ -114,6 +114,9 @@
   .badge.SYN_FLOOD { background: rgba(239,91,91,0.15); color: var(--danger); }
   .badge.TRAFFIC_ANOMALY { background: rgba(79,209,197,0.15); color: var(--accent); }
   .badge.BRUTE_FORCE { background: rgba(255,209,102,0.15); color: #ffd166; }
+  .badge.ICMP_FLOOD { background: rgba(255,140,105,0.15); color: #ff8c69; }
+  .badge.PING_SWEEP { background: rgba(125,211,252,0.15); color: #7dd3fc; }
+  .badge.ICMP_OVERSIZED { background: rgba(176,160,144,0.15); color: #b0a090; }
   .charts-header {
     display: flex;
     align-items: center;
@@ -315,6 +318,9 @@ const TYPE_COLORS = {
   TLS_ANOMALY: "#e879b9",
   ML_ANOMALY: "#9ccc65",
   BRUTE_FORCE: "#ffd166",
+  ICMP_FLOOD: "#ff8c69",
+  PING_SWEEP: "#7dd3fc",
+  ICMP_OVERSIZED: "#b0a090",
 };
 const css = getComputedStyle(document.documentElement);
 const MUTED = css.getPropertyValue("--muted").trim();

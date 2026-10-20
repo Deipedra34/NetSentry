@@ -20,6 +20,7 @@ from src.detectors import (
     Detector,
     DNSTunnelDetector,
     DosDetector,
+    ICMPDetector,
     MLAnomalyDetector,
     PortScanDetector,
     TLSAnomalyDetector,
@@ -42,6 +43,7 @@ DETECTOR_NAMES = (
     "tls_anomaly",
     "ml_anomaly",
     "brute_force",
+    "icmp",
 )
 
 
@@ -141,6 +143,18 @@ def build_detectors(config: Config, enabled: List[str] | None = None) -> List[De
                 per_service_thresholds=config.brute_force.per_service_thresholds,
                 multi_target_threshold=config.brute_force.multi_target_threshold,
                 cooldown=config.brute_force.cooldown,
+            )
+        )
+    if wants("icmp", config.icmp.enabled):
+        detectors.append(
+            ICMPDetector(
+                flood_max_packets=config.icmp.flood_max_packets,
+                flood_window_seconds=config.icmp.flood_window_seconds,
+                sweep_max_hosts=config.icmp.sweep_max_hosts,
+                sweep_window_seconds=config.icmp.sweep_window_seconds,
+                flag_large_packets=config.icmp.flag_large_packets,
+                large_packet_bytes=config.icmp.large_packet_bytes,
+                cooldown=config.icmp.cooldown,
             )
         )
 

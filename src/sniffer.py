@@ -24,7 +24,7 @@ def parse_packet(packet: object) -> Optional[PacketInfo]:
     normally happen but better safe.
     """
     from scapy.layers.dns import DNS, dnsqtypes
-    from scapy.layers.inet import IP, TCP, UDP
+    from scapy.layers.inet import ICMP, IP, TCP, UDP
     from scapy.layers.l2 import ARP, Ether
 
     if packet is None:
@@ -77,6 +77,11 @@ def parse_packet(packet: object) -> Optional[PacketInfo]:
             info.protocol = "UDP"
             info.src_port = int(udp.sport)
             info.dst_port = int(udp.dport)
+        elif ICMP in packet:
+            icmp = packet[ICMP]
+            info.protocol = "ICMP"
+            info.icmp_type = int(icmp.type)
+            info.icmp_code = int(icmp.code)
         else:
             info.protocol = "IP"
 

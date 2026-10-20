@@ -21,7 +21,7 @@ database, and surfaces them on a self-refreshing Flask dashboard.
 
 ## Features
 
-NetSentry ships with eight independent detectors, each individually
+NetSentry ships with nine independent detectors, each individually
 configurable and individually toggleable:
 
 | Detector | What it catches | Signal |
@@ -34,6 +34,7 @@ configurable and individually toggleable:
 | **TLS/HTTPS Anomaly** | Malware/C2 traffic hidden inside TLS handshakes | A client JA3 fingerprint on a known-malicious blocklist, and/or a server certificate that's self-signed, expired, short-lived, or very recently issued |
 | **ML Anomaly Detection** | Traffic patterns that don't fit any fixed threshold | An Isolation Forest / Random Forest model trained on your own captured traffic scores each source IP's packet rate, port/IP fan-out, packet size, protocol mix, and SYN ratio; **opt-in, disabled by default** -- needs a trained model first, see below |
 | **Brute-Force Login Attempts** | Password guessing against SSH, RDP, FTP, Telnet, SMB, MySQL, PostgreSQL, VNC (and optionally HTTP/HTTPS) | ≥ *N* new TCP connection attempts (SYN only) from one source IP to one host:port within *T* seconds, or to many hosts/services at once (credential spraying) |
+| **ICMP Flood / Ping Sweep** | ICMP echo floods, ping sweeps (host discovery / reconnaissance), and oversized pings | ≥ *N* ICMP echo requests from one source IP within *T* seconds (flood), echo requests to ≥ *N* distinct hosts within *T* seconds (sweep), and/or a single echo request over a size limit |
 
 Every detected event is persisted with a timestamp, source IP, event type,
 and a human-readable details string, and is immediately visible on the live
@@ -60,6 +61,7 @@ flowchart LR
         TLS["TLSAnomalyDetector"]
         ML["MLAnomalyDetector"]
         BF["BruteForceDetector"]
+        ICMP["ICMPDetector"]
     end
 
     Engine --> PS
@@ -70,6 +72,7 @@ flowchart LR
     Engine --> TLS
     Engine --> ML
     Engine --> BF
+    Engine --> ICMP
 
     PS -->|"Event"| DB[("SQLite\nnetsentry.db")]
     ARP -->|"Event"| DB
@@ -79,6 +82,7 @@ flowchart LR
     TLS -->|"Event"| DB
     ML -->|"Event"| DB
     BF -->|"Event"| DB
+    ICMP -->|"Event"| DB
 
     Model[("data/ml_model.joblib\n(trained offline)")] -.loaded at startup.-> ML
     Train["scripts/train_ml_model.py"] -.saves.-> Model
@@ -135,7 +139,7 @@ netsentry/
 │   ├── engine.py                 # Wires detectors + database together
 │   ├── database.py               # SQLite event storage
 │   ├── logging_config.py         # Console + rotating file logging
-│   ├── detectors.py              # Detector interface + all eight detectors
+│   ├── detectors.py              # Detector interface + all nine detectors
 │   ├── tls_parser.py             # Minimal TLS handshake parsing (JA3 + certs)
 │   ├── ml_features.py            # Per-source-IP traffic feature extraction
 │   ├── notifications.py          # Discord / Telegram / email alert dispatch
@@ -157,6 +161,7 @@ netsentry/
     ├── test_tls_anomaly.py
     ├── test_ml_anomaly.py
     ├── test_brute_force.py
+    ├── test_icmp.py
     ├── test_database.py
     ├── test_config.py
     ├── test_sniffer.py
@@ -474,7 +479,7 @@ sudo python main.py -i eth0 --detectors port_scan,dos
 ```
 
 Valid detector names: `port_scan`, `arp_spoof`, `dos`, `traffic_anomaly`,
-`dns_tunnel`, `tls_anomaly`, `brute_force`.
+`dns_tunnel`, `tls_anomaly`, `brute_force`, `icmp`.
 
 ### Browse an existing database without capturing
 
@@ -609,8 +614,8 @@ A debug-level log line is emitted each time a packet is skipped this way.
 ## Notifications
 
 NetSentry can push critical alerts (SYN flood, ARP spoofing, traffic
-anomalies, port scans, DNS tunneling, TLS anomalies, and brute-force login
-attempts) out to Discord,
+anomalies, port scans, DNS tunneling, TLS anomalies, brute-force login
+attempts, ICMP floods, and ping sweeps) out to Discord,
 Telegram, and/or email as they happen, in addition to logging them and
 writing them to the dashboard. All
 three channels are independently configurable under `notifications` in
@@ -667,7 +672,7 @@ notifications:
 
 NetSentry can automatically save the raw traffic around a critical event
 (SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling, TLS
-anomalies, brute-force login attempts) to a `.pcap` file, so you have the actual packets to dig into
+anomalies, brute-force login attempts, ICMP floods, ping sweeps) to a `.pcap` file, so you have the actual packets to dig into
 later instead of just the one-line alert. It's configured under `pcap_export` in `config.yaml` and
 disabled by default — see the commented example already in the shipped
 `config.yaml`.
@@ -716,7 +721,7 @@ the default `.pcap` handler), or from the command line with `tcpdump -r` /
 
 NetSentry can automatically block the source IP behind a critical event
 (SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling, TLS
-anomalies, or brute-force login attempts, same as notifications/PCAP export) at the OS firewall level,
+anomalies, brute-force login attempts, ICMP floods, or ping sweeps, same as notifications/PCAP export) at the OS firewall level,
 via `AutoBlocker` in `src/auto_block.py`. It's configured under `auto_block` in `config.yaml` and
 disabled by default — see the commented example already in the shipped
 `config.yaml`.
@@ -725,8 +730,8 @@ disabled by default — see the commented example already in the shipped
 
 1. `auto_block.enabled` must be `true`.
 2. The event's type must meet or exceed `auto_block.min_severity`
-   (`low` / `medium` / `high` / `critical` — port scans and brute-force
-   login attempts are `low`, traffic
+   (`low` / `medium` / `high` / `critical` — port scans, brute-force
+   login attempts, ICMP floods, and ping sweeps are `low`, traffic
    anomalies `medium`, ARP spoofing, DNS tunneling, and TLS anomalies
    `high`, SYN floods `critical`).
 3. The source IP must **not** be on the `whitelist` — this is a hard rule,
@@ -1130,6 +1135,80 @@ Windows Security log's event 4625 for RDP/SMB).
 
 ---
 
+## ICMP Flood and Ping Sweep Detection
+
+ICMP echo requests ("pings") are harmless one at a time, but two patterns
+are worth knowing about. NetSentry's `ICMPDetector` (`src/detectors.py`)
+watches for both, plus oversized pings, and raises a separate event type for
+each, so the dashboard's distribution chart can tell reconnaissance apart
+from flooding:
+
+| Event type | Pattern | Example details |
+|---|---|---|
+| `ICMP_FLOOD` | **ICMP flood** — one source IP sending an abnormal volume of echo requests, trying to saturate a host or link | `ICMP flood: 240 echo requests in 10s (~24.0/s, threshold: 100)` |
+| `PING_SWEEP` | **Ping sweep** — one source IP pinging many different hosts in a short time to find out which ones are alive; usually the first step of network reconnaissance | `Ping sweep: 38 distinct hosts probed in 30s (threshold: 15); recent hosts: [...]` |
+| `ICMP_OVERSIZED` | **Oversized ping** — a single echo request far bigger than a normal ping (Linux sends 98 bytes, Windows 74), as used by ping-of-death style attacks or by tools that smuggle data through ICMP (ICMP tunneling) | `Oversized ICMP echo request: 1480 bytes to 10.0.0.2 (threshold: 1000 bytes)` |
+
+`ICMP_FLOOD` and `PING_SWEEP` are critical events, ranked `low` like port
+scans, so they flow through notifications, PCAP export, threat intelligence
+enrichment, and auto-block exactly like every other detector's events.
+`ICMP_OVERSIZED` is non-critical: a single big ping is often just a path-MTU
+test. It's logged and shown on the dashboard, but it doesn't trigger
+notifications, exports, lookups, or blocks. Whitelisted source IPs skip
+detection entirely, as with every detector.
+
+**Only echo requests count.** Echo replies (type 0) and ICMP error messages
+(destination unreachable, time exceeded, ...) are what a host sends *back*.
+If they counted, a busy server answering pings, or a router reporting
+unreachable hosts, would look like the attacker.
+
+**Internal sources are detected too.** A ping sweep from inside your own
+network (a compromised workstation mapping the LAN) is a realistic
+scenario, so private/local source IPs are detected and alerted on like any
+other. Auto-block's existing safety rule still applies, though: it never
+blocks private/local addresses, whatever the event.
+
+A per-source `cooldown` keeps a sustained flood or sweep to one alert per
+interval. It's tracked separately per event type, so an ongoing flood never
+hides a sweep from the same IP. Memory stays bounded under a spoofed-source
+flood: at most 10,000 source IPs are tracked (the least recently active one
+is dropped first), with at most 10,000 timestamps and 1,000 destination
+hosts kept per source.
+
+Settings (under `icmp` in `config.yaml`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Turn the detector on/off. |
+| `flood_max_packets` | `100` | Echo requests from one source IP within `flood_window_seconds` that trigger an `ICMP_FLOOD` alert. |
+| `flood_window_seconds` | `10` | Length of the flood sliding window, in seconds. |
+| `sweep_max_hosts` | `15` | Distinct destination IPs one source IP pings within `sweep_window_seconds` that trigger a `PING_SWEEP` alert. |
+| `sweep_window_seconds` | `30` | Length of the sweep sliding window, in seconds. |
+| `flag_large_packets` | `true` | Turn the `ICMP_OVERSIZED` check on/off. |
+| `large_packet_bytes` | `1000` | Echo requests bigger than this many bytes trigger `ICMP_OVERSIZED`. This is the captured frame size, headers included. |
+| `cooldown` | `60` | Seconds to wait before re-alerting on the same source IP, per event type. |
+
+**Tuning guidance.**
+
+- **Monitoring tools** like Nagios, Zabbix, PRTG, or Uptime Kuma ping many
+  hosts every few seconds, which is exactly what a sweep looks like. Add the
+  monitoring server(s) to the `whitelist`, and raise `sweep_max_hosts` if
+  other hosts on the network legitimately ping many targets too.
+- **Load balancers, health checkers, and network-diagnostic scripts** can
+  send steady, fast pings to one target. Raise `flood_max_packets` (or
+  whitelist them) if they trip the flood check.
+- **Path-MTU discovery and jumbo-frame testing** deliberately send large
+  pings. Raise `large_packet_bytes` above your MTU (e.g. `1600`, or `9100`
+  with jumbo frames), or set `flag_large_packets: false`, if that's routine
+  on your network.
+
+**Limitation.** An ICMP flood big enough to saturate the link can drop
+packets before NetSentry ever sees them, and capture itself can fall behind
+under heavy load. Flood counts are therefore a lower bound on the real
+volume, never an overestimate.
+
+---
+
 ## Testing
 
 The full test suite runs entirely offline against synthetic packet data —
@@ -1155,7 +1234,7 @@ points, no real training run) rather than depending on
 
 ## How each detector works
 
-All eight live in `src/detectors.py`:
+All nine live in `src/detectors.py`:
 
 - **Port Scan** (`PortScanDetector`): maintains a per-source-IP map of
   `{port: last_seen_timestamp}`, prunes entries older than the configured
@@ -1198,6 +1277,14 @@ All eight live in `src/detectors.py`:
   or the source's attempts across all targets cross
   `multi_target_threshold` (multi-target). See
   [Brute-Force Detection](#brute-force-detection) for tuning.
+- **ICMP Flood / Ping Sweep** (`ICMPDetector`): looks only at ICMP echo
+  requests (type 8); keeps a per-source-IP sliding-window deque of
+  request timestamps (flood) and a per-source-IP map of
+  `{destination IP: last_seen_timestamp}` (sweep), and checks each
+  request's size against `large_packet_bytes`. Each pattern raises its
+  own event type with its own per-source cooldown. See
+  [ICMP Flood and Ping Sweep Detection](#icmp-flood-and-ping-sweep-detection)
+  for tuning.
 
 All detectors implement per-source cooldowns so a sustained attack produces
 one alert per cooldown period rather than one per packet.

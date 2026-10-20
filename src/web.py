@@ -29,6 +29,9 @@ EVENT_TYPES: Tuple[str, ...] = (
     "TLS_ANOMALY",
     "ML_ANOMALY",
     "BRUTE_FORCE",
+    "ICMP_FLOOD",
+    "PING_SWEEP",
+    "ICMP_OVERSIZED",
 )
 
 # ?range= value -> (window length, bucket size), both in seconds. Buckets are

@@ -39,6 +39,10 @@ class PacketInfo:
     src_port: Optional[int] = None
     dst_port: Optional[int] = None
     tcp_flags: Optional[str] = None
+    # ICMP type/code, only set when protocol == "ICMP" -- e.g. type 8 is an
+    # echo request (ping), 0 an echo reply, 3 destination unreachable
+    icmp_type: Optional[int] = None
+    icmp_code: Optional[int] = None
     is_arp: bool = False
     arp_op: Optional[int] = None
     # DNS query fields, only set for DNS query packets (qr == 0) -- see

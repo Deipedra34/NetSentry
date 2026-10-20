@@ -180,6 +180,33 @@ class BruteForceConfig:
 
 
 @dataclass
+class IcmpConfig:
+    """Thresholds for ICMP flood / ping sweep / oversized ping detection --
+    see src/detectors.py (ICMPDetector).
+
+    Only ICMP echo requests (type 8) count, never echo replies or error
+    messages, so a busy host answering pings can't look like an attacker.
+    """
+
+    enabled: bool = True
+    # echo requests from one source IP within flood_window_seconds that
+    # trigger a flood alert
+    flood_max_packets: int = 100
+    flood_window_seconds: int = 10
+    # distinct destination IPs one source IP pings within
+    # sweep_window_seconds that trigger a sweep alert
+    sweep_max_hosts: int = 15
+    sweep_window_seconds: int = 30
+    # flag echo requests bigger than large_packet_bytes (captured frame size)
+    # -- ping-of-death style packets or ICMP tunneling
+    flag_large_packets: bool = True
+    large_packet_bytes: int = 1000
+    # seconds to wait before re-alerting on the same source IP, tracked
+    # separately for each of the three event types
+    cooldown: float = 60.0
+
+
+@dataclass
 class DatabaseConfig:
     """SQLite event database settings."""
 
@@ -343,6 +370,7 @@ class Config:
     tls_anomaly: TlsAnomalyConfig = field(default_factory=TlsAnomalyConfig)
     ml_anomaly: MlAnomalyConfig = field(default_factory=MlAnomalyConfig)
     brute_force: BruteForceConfig = field(default_factory=BruteForceConfig)
+    icmp: IcmpConfig = field(default_factory=IcmpConfig)
     # source IPs/CIDR ranges that skip detection entirely, see src/engine.py
     whitelist: List[str] = field(default_factory=list)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
