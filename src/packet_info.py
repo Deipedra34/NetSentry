@@ -59,6 +59,14 @@ class PacketInfo:
     tls_cert_issuer: Optional[str] = None
     tls_cert_not_before: Optional[datetime] = None
     tls_cert_not_after: Optional[datetime] = None
+    # DHCP fields, only set for well-formed DHCP packets on UDP 67/68 -- see
+    # sniffer.py. dhcp_message_type is option 53 as an uppercase name (e.g.
+    # "DISCOVER", "OFFER", "REQUEST", "ACK", "NAK"), dhcp_chaddr the client
+    # hardware address from the BOOTP header, dhcp_server_id option 54 (the
+    # server's IP) when present. The Ethernet source MAC is src_mac as usual.
+    dhcp_message_type: Optional[str] = None
+    dhcp_chaddr: Optional[str] = None
+    dhcp_server_id: Optional[str] = None
     length: int = 0
     # original Scapy packet object, if this PacketInfo came from a live
     # capture (sniffer.py sets it) -- None for hand-built test packets

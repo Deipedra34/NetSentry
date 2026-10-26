@@ -9,6 +9,7 @@ with just made-up packets instead of a real capture.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import math
 from abc import ABC, abstractmethod
@@ -36,6 +37,7 @@ __all__ = [
     "MLAnomalyDetector",
     "BruteForceDetector",
     "ICMPDetector",
+    "DHCPDetector",
 ]
 
 
@@ -1092,3 +1094,225 @@ class ICMPDetector(Detector):
             )
 
         return events
+
+
+class DHCPDetector(Detector):
+    """Flags DHCP starvation and rogue DHCP servers.
+
+      1. DHCP_STARVATION: one Ethernet source MAC sending DISCOVER/REQUEST
+         messages for `starvation_max_clients` distinct client MACs (the
+         BOOTP chaddr field) within `starvation_window_seconds`. A normal
+         host only ever asks for itself; tools like Yersinia or DHCPStarv
+         fake a fresh chaddr per request to drain the address pool.
+      2. ROGUE_DHCP_SERVER: an OFFER/ACK from a server (option 54, or the IP
+         source if that's missing) that isn't trusted. Trusted means listed
+         in `trusted_servers`, covered by the global whitelist, or -- only
+         when `trusted_servers` is empty and `learn_trusted_server` is on --
+         the first server seen in the first `learning_seconds` of capture.
+         With nothing trusted at all, `alert_on_multiple_servers` instead
+         alerts once a second distinct server answers within
+         `server_window_seconds`.
+
+    DISCOVERs come from 0.0.0.0, so starvation events keep the packet's IP
+    as source_ip (like ARP spoofing, which also puts the MACs in the
+    details) and are tracked/cooled down per source MAC. Rogue server events
+    use the server's IP. Cooldowns are per (source, event type).
+    """
+
+    # this detector raises the two event types below rather than `name`,
+    # which is just what the engine calls it in logs
+    name = "DHCP"
+    STARVATION_EVENT = "DHCP_STARVATION"
+    ROGUE_EVENT = "ROGUE_DHCP_SERVER"
+
+    CLIENT_MESSAGES = frozenset({"DISCOVER", "REQUEST"})
+    # server message type -> how a rogue alert describes it
+    SERVER_MESSAGES = {"OFFER": "offered a lease", "ACK": "acknowledged a lease"}
+    # same memory caps as ICMPDetector: tracked source MACs, servers and
+    # cooldown entries are capped (least recently active dropped first)...
+    MAX_TRACKED_SOURCES = 10_000
+    # ...and so are the client MACs kept per source
+    MAX_CLIENTS_PER_SOURCE = 1_000
+    # how many client MACs a starvation alert lists
+    MAX_LISTED_CLIENTS = 10
+
+    def __init__(
+        self,
+        starvation_max_clients: int = 20,
+        starvation_window_seconds: float = 30.0,
+        trusted_servers: Optional[List[str]] = None,
+        learn_trusted_server: bool = True,
+        learning_seconds: float = 120.0,
+        alert_on_multiple_servers: bool = True,
+        server_window_seconds: float = 300.0,
+        cooldown: float = 60.0,
+        whitelist: Optional[List[str]] = None,
+    ) -> None:
+        # whitelist = the global config whitelist; whitelisted server IPs
+        # count as trusted, same as everywhere else the whitelist applies
+        self.starvation_max_clients = starvation_max_clients
+        self.starvation_window_seconds = starvation_window_seconds
+        self.trusted_servers = {_normalize_ip(s) for s in (trusted_servers or [])}
+        self.learn_trusted_server = learn_trusted_server
+        self.learning_seconds = learning_seconds
+        self.alert_on_multiple_servers = alert_on_multiple_servers
+        self.server_window_seconds = server_window_seconds
+        self.cooldown = cooldown
+        self._whitelist_networks = [
+            ipaddress.ip_network(entry, strict=False) for entry in (whitelist or [])
+        ]
+        # the server trusted by learning mode, if any
+        self.learned_server: Optional[str] = None
+        # learning window closes this long after the first packet seen
+        self._learning_until: Optional[float] = None
+        self._max_clients = max(self.MAX_CLIENTS_PER_SOURCE, starvation_max_clients)
+        # src_mac -> {chaddr: last_seen_timestamp}, oldest first
+        self._clients_by_mac: Dict[str, Dict[str, float]] = {}
+        # server IP -> last_seen_timestamp, oldest first (multi-server mode)
+        self._servers_seen: Dict[str, float] = {}
+        # (src_mac or server IP, event_type) -> last alert timestamp
+        self._last_alert: Dict[Tuple[str, str], float] = {}
+
+    def _touch(self, store: Dict[Any, Any], key: Any, value: Any) -> Any:
+        """Sets store[key] (keeping an existing value if there is one),
+        re-inserting it so dict order doubles as least-recently-active-first,
+        and evicts the oldest key once store is at MAX_TRACKED_SOURCES."""
+        existing = store.pop(key, None)
+        if existing is None:
+            if len(store) >= self.MAX_TRACKED_SOURCES:
+                del store[next(iter(store))]
+            existing = value
+        store[key] = existing
+        return existing
+
+    @staticmethod
+    def _expire(entries: Dict[str, float], cutoff: float) -> None:
+        """Drops entries last seen before cutoff -- entries are kept oldest
+        first, so this stops at the first one still inside the window."""
+        while entries:
+            oldest = next(iter(entries))
+            if entries[oldest] >= cutoff:
+                break
+            del entries[oldest]
+
+    def _alert(
+        self, key: str, event_type: str, source_ip: str, now: float, details: str
+    ) -> List[Event]:
+        """One event, unless key is still on cooldown for this event_type."""
+        alert_key = (key, event_type)
+        last_alert = self._last_alert.get(alert_key, float("-inf"))
+        if now - last_alert < self.cooldown:
+            return []
+        self._last_alert.pop(alert_key, None)
+        if len(self._last_alert) >= self.MAX_TRACKED_SOURCES:
+            del self._last_alert[next(iter(self._last_alert))]
+        self._last_alert[alert_key] = now
+        return [
+            Event(
+                event_type=event_type,
+                source_ip=source_ip,
+                details=details,
+                timestamp=to_datetime(now),
+            )
+        ]
+
+    def process_packet(self, packet: PacketInfo) -> List[Event]:
+        """Routes DHCP client messages to the starvation check and server
+        replies to the rogue server check; everything else is ignored."""
+        if self._learning_until is None:
+            self._learning_until = packet.timestamp + self.learning_seconds
+        if packet.protocol != "UDP" or not packet.dhcp_message_type:
+            return []
+        if packet.dhcp_message_type in self.CLIENT_MESSAGES:
+            return self._check_starvation(packet)
+        if packet.dhcp_message_type in self.SERVER_MESSAGES:
+            return self._check_server(packet)
+        return []
+
+    def _check_starvation(self, packet: PacketInfo) -> List[Event]:
+        # clients send from UDP 68; a relay agent forwards *every* client's
+        # request from port 67 under its own MAC, which would otherwise look
+        # exactly like starvation
+        if packet.src_port != 68 or not packet.src_mac or not packet.dhcp_chaddr:
+            return []
+
+        now = packet.timestamp
+        clients = self._touch(self._clients_by_mac, packet.src_mac, {})
+        clients.pop(packet.dhcp_chaddr, None)
+        clients[packet.dhcp_chaddr] = now
+        self._expire(clients, now - self.starvation_window_seconds)
+        if len(clients) > self._max_clients:
+            del clients[next(iter(clients))]
+        if len(clients) < self.starvation_max_clients:
+            return []
+
+        recent = list(clients)[-self.MAX_LISTED_CLIENTS:]
+        details = (
+            f"DHCP starvation: {len(clients)} distinct client MACs from {packet.src_mac} "
+            f"in {self.starvation_window_seconds:.0f}s "
+            f"(threshold: {self.starvation_max_clients}); recent client MACs: {recent}"
+        )
+        return self._alert(
+            packet.src_mac, self.STARVATION_EVENT, packet.src_ip or "0.0.0.0", now, details
+        )
+
+    def _is_trusted(self, server: str) -> bool:
+        if server in self.trusted_servers or server == self.learned_server:
+            return True
+        try:
+            addr = ipaddress.ip_address(server)
+        except ValueError:
+            return False
+        return any(addr in network for network in self._whitelist_networks)
+
+    def _check_server(self, packet: PacketInfo) -> List[Event]:
+        server = _normalize_ip(packet.dhcp_server_id or packet.src_ip or "")
+        if not server or self._is_trusted(server):
+            return []
+
+        now = packet.timestamp
+        action = self.SERVER_MESSAGES[packet.dhcp_message_type or ""]
+        seen_as = f"client {packet.dhcp_chaddr}, server MAC {packet.src_mac}"
+
+        if self.trusted_servers or self.learned_server:
+            trusted = sorted(self.trusted_servers) or [f"{self.learned_server} (learned)"]
+            details = (
+                f"Rogue DHCP server {server} {action} (trusted: {', '.join(trusted)}); {seen_as}"
+            )
+            return self._alert(server, self.ROGUE_EVENT, server, now, details)
+
+        if self.learn_trusted_server and self._learning_until is not None and now <= self._learning_until:
+            self.learned_server = server
+            logger.warning(
+                "No dhcp.trusted_servers configured -- learned DHCP server %s (MAC %s) "
+                "as trusted. Set dhcp.trusted_servers explicitly so a rogue server that "
+                "was already present can never be learned instead.",
+                server,
+                packet.src_mac,
+            )
+            return []
+
+        if not self.alert_on_multiple_servers:
+            return []
+        self._touch(self._servers_seen, server, now)
+        self._servers_seen[server] = now
+        self._expire(self._servers_seen, now - self.server_window_seconds)
+        others = [s for s in self._servers_seen if s != server]
+        if not others:
+            return []
+        details = (
+            f"Multiple DHCP servers answering within {self.server_window_seconds:.0f}s: "
+            f"{server} {action}, also seen: {', '.join(others)} "
+            f"(no trusted servers configured); {seen_as}"
+        )
+        return self._alert(server, self.ROGUE_EVENT, server, now, details)
+
+
+def _normalize_ip(value: str) -> str:
+    """Canonical form of an IP string (so "192.168.001.1"-style variants
+    still match), or the stripped input unchanged if it isn't an IP."""
+    value = value.strip()
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return value

@@ -10,12 +10,55 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from src import tls_parser
 from src.packet_info import PacketInfo
 
 logger = logging.getLogger("netsentry.sniffer")
+
+
+def _parse_dhcp(packet: Any, info: PacketInfo) -> None:
+    """Fills info's dhcp_* fields from a BOOTP/DHCP packet (UDP 67/68).
+
+    Truncated or malformed packets (no BOOTP header, a bad hardware address
+    length, missing or garbled options) just leave the fields None, with a
+    debug log -- this never raises, so one bad packet can't affect capture.
+    """
+    from scapy.layers.dhcp import BOOTP, DHCP, DHCPTypes
+
+    try:
+        if BOOTP not in packet or DHCP not in packet:
+            logger.debug("Skipping truncated/non-DHCP packet on UDP 67/68 from %s", info.src_mac)
+            return
+        bootp = packet[BOOTP]
+        hlen = int(bootp.hlen)
+        chaddr = bytes(bootp.chaddr or b"")
+        if not 1 <= hlen <= len(chaddr):
+            logger.debug("Skipping DHCP packet with bad hardware address length %d", hlen)
+            return
+
+        message_type: Optional[str] = None
+        server_id: Optional[str] = None
+        for option in packet[DHCP].options:
+            # garbled options come through as raw bytes instead of tuples
+            if not isinstance(option, tuple) or len(option) < 2:
+                continue
+            name, value = option[0], option[1]
+            if name == "message-type":
+                message_type = str(DHCPTypes.get(value, value)).upper()
+            elif name == "server_id":
+                server_id = str(value)
+        if message_type is None:
+            logger.debug("Skipping DHCP packet without a message type option")
+            return
+    except Exception:  # noqa: BLE001 - malformed DHCP must never take down capture
+        logger.debug("Skipping malformed DHCP packet", exc_info=True)
+        return
+
+    info.dhcp_message_type = message_type
+    info.dhcp_chaddr = ":".join(f"{b:02x}" for b in chaddr[:hlen])
+    info.dhcp_server_id = server_id
 
 
 def parse_packet(packet: object) -> Optional[PacketInfo]:
@@ -77,6 +120,8 @@ def parse_packet(packet: object) -> Optional[PacketInfo]:
             info.protocol = "UDP"
             info.src_port = int(udp.sport)
             info.dst_port = int(udp.dport)
+            if {info.src_port, info.dst_port} & {67, 68}:
+                _parse_dhcp(packet, info)
         elif ICMP in packet:
             icmp = packet[ICMP]
             info.protocol = "ICMP"

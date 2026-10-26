@@ -21,7 +21,7 @@ database, and surfaces them on a self-refreshing Flask dashboard.
 
 ## Features
 
-NetSentry ships with nine independent detectors, each individually
+NetSentry ships with ten independent detectors, each individually
 configurable and individually toggleable:
 
 | Detector | What it catches | Signal |
@@ -35,6 +35,7 @@ configurable and individually toggleable:
 | **ML Anomaly Detection** | Traffic patterns that don't fit any fixed threshold | An Isolation Forest / Random Forest model trained on your own captured traffic scores each source IP's packet rate, port/IP fan-out, packet size, protocol mix, and SYN ratio; **opt-in, disabled by default** -- needs a trained model first, see below |
 | **Brute-Force Login Attempts** | Password guessing against SSH, RDP, FTP, Telnet, SMB, MySQL, PostgreSQL, VNC (and optionally HTTP/HTTPS) | ≥ *N* new TCP connection attempts (SYN only) from one source IP to one host:port within *T* seconds, or to many hosts/services at once (credential spraying) |
 | **ICMP Flood / Ping Sweep** | ICMP echo floods, ping sweeps (host discovery / reconnaissance), and oversized pings | ≥ *N* ICMP echo requests from one source IP within *T* seconds (flood), echo requests to ≥ *N* distinct hosts within *T* seconds (sweep), and/or a single echo request over a size limit |
+| **DHCP Starvation / Rogue DHCP Server** | Address-pool exhaustion attacks, and unauthorized DHCP servers handing out leases | DISCOVER/REQUEST messages for ≥ *N* distinct client MACs from one Ethernet source within *T* seconds (starvation), and/or an OFFER/ACK from a server that isn't trusted (rogue server) |
 
 Every detected event is persisted with a timestamp, source IP, event type,
 and a human-readable details string, and is immediately visible on the live
@@ -62,6 +63,7 @@ flowchart LR
         ML["MLAnomalyDetector"]
         BF["BruteForceDetector"]
         ICMP["ICMPDetector"]
+        DHCP["DHCPDetector"]
     end
 
     Engine --> PS
@@ -73,6 +75,7 @@ flowchart LR
     Engine --> ML
     Engine --> BF
     Engine --> ICMP
+    Engine --> DHCP
 
     PS -->|"Event"| DB[("SQLite\nnetsentry.db")]
     ARP -->|"Event"| DB
@@ -83,6 +86,7 @@ flowchart LR
     ML -->|"Event"| DB
     BF -->|"Event"| DB
     ICMP -->|"Event"| DB
+    DHCP -->|"Event"| DB
 
     Model[("data/ml_model.joblib\n(trained offline)")] -.loaded at startup.-> ML
     Train["scripts/train_ml_model.py"] -.saves.-> Model
@@ -139,7 +143,7 @@ netsentry/
 │   ├── engine.py                 # Wires detectors + database together
 │   ├── database.py               # SQLite event storage
 │   ├── logging_config.py         # Console + rotating file logging
-│   ├── detectors.py              # Detector interface + all nine detectors
+│   ├── detectors.py              # Detector interface + all ten detectors
 │   ├── tls_parser.py             # Minimal TLS handshake parsing (JA3 + certs)
 │   ├── ml_features.py            # Per-source-IP traffic feature extraction
 │   ├── notifications.py          # Discord / Telegram / email alert dispatch
@@ -162,6 +166,7 @@ netsentry/
     ├── test_ml_anomaly.py
     ├── test_brute_force.py
     ├── test_icmp.py
+    ├── test_dhcp.py
     ├── test_database.py
     ├── test_config.py
     ├── test_sniffer.py
@@ -479,7 +484,7 @@ sudo python main.py -i eth0 --detectors port_scan,dos
 ```
 
 Valid detector names: `port_scan`, `arp_spoof`, `dos`, `traffic_anomaly`,
-`dns_tunnel`, `tls_anomaly`, `brute_force`, `icmp`.
+`dns_tunnel`, `tls_anomaly`, `brute_force`, `icmp`, `dhcp`.
 
 ### Browse an existing database without capturing
 
@@ -615,7 +620,8 @@ A debug-level log line is emitted each time a packet is skipped this way.
 
 NetSentry can push critical alerts (SYN flood, ARP spoofing, traffic
 anomalies, port scans, DNS tunneling, TLS anomalies, brute-force login
-attempts, ICMP floods, and ping sweeps) out to Discord,
+attempts, ICMP floods, ping sweeps, DHCP starvation, and rogue DHCP
+servers) out to Discord,
 Telegram, and/or email as they happen, in addition to logging them and
 writing them to the dashboard. All
 three channels are independently configurable under `notifications` in
@@ -672,7 +678,7 @@ notifications:
 
 NetSentry can automatically save the raw traffic around a critical event
 (SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling, TLS
-anomalies, brute-force login attempts, ICMP floods, ping sweeps) to a `.pcap` file, so you have the actual packets to dig into
+anomalies, brute-force login attempts, ICMP floods, ping sweeps, DHCP starvation, rogue DHCP servers) to a `.pcap` file, so you have the actual packets to dig into
 later instead of just the one-line alert. It's configured under `pcap_export` in `config.yaml` and
 disabled by default — see the commented example already in the shipped
 `config.yaml`.
@@ -721,7 +727,7 @@ the default `.pcap` handler), or from the command line with `tcpdump -r` /
 
 NetSentry can automatically block the source IP behind a critical event
 (SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling, TLS
-anomalies, brute-force login attempts, ICMP floods, or ping sweeps, same as notifications/PCAP export) at the OS firewall level,
+anomalies, brute-force login attempts, ICMP floods, ping sweeps, DHCP starvation, or rogue DHCP servers, same as notifications/PCAP export) at the OS firewall level,
 via `AutoBlocker` in `src/auto_block.py`. It's configured under `auto_block` in `config.yaml` and
 disabled by default — see the commented example already in the shipped
 `config.yaml`.
@@ -732,8 +738,8 @@ disabled by default — see the commented example already in the shipped
 2. The event's type must meet or exceed `auto_block.min_severity`
    (`low` / `medium` / `high` / `critical` — port scans, brute-force
    login attempts, ICMP floods, and ping sweeps are `low`, traffic
-   anomalies `medium`, ARP spoofing, DNS tunneling, and TLS anomalies
-   `high`, SYN floods `critical`).
+   anomalies `medium`, ARP spoofing, DNS tunneling, TLS anomalies, DHCP
+   starvation, and rogue DHCP servers `high`, SYN floods `critical`).
 3. The source IP must **not** be on the `whitelist` — this is a hard rule,
    checked independently of any config, never overridden.
 4. The source IP must **not** be a private/local address (loopback,
@@ -1209,6 +1215,112 @@ volume, never an overestimate.
 
 ---
 
+## DHCP Starvation and Rogue Server Detection
+
+DHCP is how most devices get their IP address, default gateway, and DNS
+servers, and it has no authentication at all. That makes two attacks
+possible, and NetSentry's `DHCPDetector` (`src/detectors.py`) watches for
+both, with a separate event type for each:
+
+| Event type | Attack | Example details |
+|---|---|---|
+| `DHCP_STARVATION` | **DHCP starvation**: one machine floods the DHCP server with requests, each pretending to come from a different client MAC address, until the address pool is exhausted. New and returning devices then can't get an address at all, a denial of service. It's often the first step toward a rogue server too, since it knocks the real server out of the picture. Tools like Yersinia and DHCPStarv automate it. | `DHCP starvation: 87 distinct client MACs from aa:bb:cc:dd:ee:ff in 30s (threshold: 20); recent client MACs: [...]` |
+| `ROGUE_DHCP_SERVER` | **Rogue DHCP server**: an unauthorized server answers clients' requests. Whoever wins the race hands out the client's network settings, so a rogue server can name itself as the default gateway or DNS server and put every client behind a man-in-the-middle. It can also be an innocent misconfiguration, such as a consumer router plugged in backwards. | `Rogue DHCP server 192.168.1.66 offered a lease (trusted: 192.168.1.1); client 11:22:33:44:55:66, server MAC de:ad:be:ef:00:01` |
+
+Both are critical events, ranked `high` like ARP spoofing, so they flow
+through notifications, PCAP export, and the dashboard exactly like every
+other detector's events.
+
+**How starvation is spotted.** Every DHCP request carries the client's own
+hardware address in the `chaddr` field. A normal device only ever asks for
+itself, so its Ethernet source MAC and its `chaddr` match, and it shows up
+as a single client. Starvation tools fake a new `chaddr` for every request
+while sending everything from the same network card, so NetSentry counts
+the distinct `chaddr` values in DISCOVER and REQUEST messages per Ethernet
+source MAC. Server replies (OFFER/ACK) never count. Neither do requests
+forwarded by a DHCP relay agent (sent from UDP port 67 rather than the
+client port 68), since a relay legitimately forwards every client's request
+under its own MAC.
+
+DISCOVERs are sent from `0.0.0.0`, because the client has no address yet.
+Like ARP spoofing events, starvation events keep the packet's IP in the
+`source_ip` field (`0.0.0.0` for a DISCOVER) and name the attacking MAC
+address in the details. NetSentry never acts on `0.0.0.0` or any other
+non-routable address: threat intelligence only looks up publicly routable
+IPs, and auto-block never blocks private/local addresses. Rogue server
+events use the server's IP as the source.
+
+**How rogue servers are spotted.** Every OFFER and ACK is checked against
+the trusted servers, using the server identifier (option 54), or the
+packet's IP source if that option is missing. A server is trusted if it's:
+
+1. listed in `trusted_servers`, or
+2. covered by the global `whitelist`, the same way the whitelist exempts
+   IPs everywhere else, or
+3. learned automatically (see below), only when `trusted_servers` is empty.
+
+**Trusted server learning, and its risk.** With `trusted_servers` empty and
+`learn_trusted_server: true`, the first DHCP server that answers anyone
+during the first `learning_seconds` of capture is trusted from then on, and
+a warning is logged naming exactly which server (IP and MAC) was learned.
+Any other server answering afterwards is reported as rogue. This is
+convenient, but **if an attacker's rogue server is already running when
+NetSentry starts, it may be the one that gets learned**, and the real server
+is then reported as rogue instead. **Setting `trusted_servers` explicitly is
+strongly recommended.** As soon as it's set, learning is switched off
+entirely. Also note that whitelisted IPs skip detection entirely, so
+learning never sees them. If you whitelist your DHCP server, list it in
+`trusted_servers` too.
+
+If nothing is trusted at all (learning is off, or no server answered during
+the learning window), `alert_on_multiple_servers` falls back to alerting as
+soon as a second distinct server answers within `server_window_seconds`. In
+that mode NetSentry can't tell which server is the legitimate one, so each
+server that keeps answering is reported.
+
+A per-source `cooldown` keeps an ongoing attack to one alert per interval.
+It's tracked per Ethernet source MAC for starvation and per server for rogue
+servers, and separately per event type, so one alert never hides the
+other. Memory stays bounded under a flood of fake requests: at most 10,000
+source MACs and servers are tracked (the least recently active one is
+dropped first), with at most 1,000 client MACs kept per source.
+
+Settings (under `dhcp` in `config.yaml`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Turn the detector on/off. |
+| `starvation_max_clients` | `20` | Distinct client MACs (`chaddr`) in DISCOVER/REQUEST messages from one Ethernet source MAC within `starvation_window_seconds` that trigger a `DHCP_STARVATION` alert. |
+| `starvation_window_seconds` | `30` | Length of the starvation sliding window, in seconds. |
+| `trusted_servers` | `[]` | Legitimate DHCP server IPs. Any other server answering raises `ROGUE_DHCP_SERVER`. Setting this disables learning. |
+| `learn_trusted_server` | `true` | With no `trusted_servers`, trust the first server seen during the first `learning_seconds` of capture. |
+| `learning_seconds` | `120` | Length of the learning window, counted from the first packet NetSentry captures. |
+| `alert_on_multiple_servers` | `true` | With nothing trusted or learned, alert when more than one distinct server answers within `server_window_seconds`. |
+| `server_window_seconds` | `300` | How long a server counts as "recently seen" for `alert_on_multiple_servers`. |
+| `cooldown` | `60` | Seconds to wait before re-alerting on the same source MAC (starvation) or server (rogue), per event type. |
+
+**Tuning guidance.**
+
+- **List every legitimate DHCP server in `trusted_servers`.** That includes
+  failover pairs and split-scope setups, where two servers answer every
+  request. Otherwise the second one is reported as rogue.
+- **Wireless repeaters, range extenders, and some bridges** forward many
+  clients' DHCP requests under their own MAC address. If one trips the
+  starvation check, raise `starvation_max_clients` above the number of
+  clients behind it.
+- **Virtualization hosts** normally give each VM its own MAC, so they don't
+  trip the starvation check. Hosts that NAT their VMs' traffic behind one
+  MAC can, so the same advice applies.
+
+**Limitation.** DHCP DISCOVERs and OFFERs are broadcast, and broadcasts don't
+cross routers, so NetSentry only sees DHCP traffic on the network segment
+where it's listening: a host on the same VLAN, or a switch port mirroring
+that VLAN. To cover several VLANs, capture on an interface (or mirror port)
+in each of them. Requests a relay agent forwards to a server on another
+segment are only visible there in their relayed, unicast form.
+
+---
+
 ## Testing
 
 The full test suite runs entirely offline against synthetic packet data —
@@ -1234,7 +1346,7 @@ points, no real training run) rather than depending on
 
 ## How each detector works
 
-All nine live in `src/detectors.py`:
+All ten live in `src/detectors.py`:
 
 - **Port Scan** (`PortScanDetector`): maintains a per-source-IP map of
   `{port: last_seen_timestamp}`, prunes entries older than the configured
@@ -1284,6 +1396,13 @@ All nine live in `src/detectors.py`:
   request's size against `large_packet_bytes`. Each pattern raises its
   own event type with its own per-source cooldown. See
   [ICMP Flood and Ping Sweep Detection](#icmp-flood-and-ping-sweep-detection)
+  for tuning.
+- **DHCP Starvation / Rogue DHCP Server** (`DHCPDetector`): keeps a
+  per-source-MAC map of `{client MAC (chaddr): last_seen_timestamp}` from
+  DISCOVER/REQUEST messages and alerts once it holds too many distinct
+  clients within the window; checks every OFFER/ACK's server identifier
+  against the trusted (configured, whitelisted, or learned) servers. See
+  [DHCP Starvation and Rogue Server Detection](#dhcp-starvation-and-rogue-server-detection)
   for tuning.
 
 All detectors implement per-source cooldowns so a sustained attack produces

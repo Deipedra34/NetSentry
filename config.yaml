@@ -193,6 +193,36 @@ icmp:
 #   large_packet_bytes: 1600
 #   cooldown: 120
 
+# DHCP starvation / rogue DHCP server detection: one Ethernet source MAC
+# requesting leases for many different client MACs (starvation -- drains
+# the address pool so real devices can't get one), and DHCP servers you
+# don't trust answering clients (rogue server -- can hand out a malicious
+# gateway or DNS server for man-in-the-middle). See README.md "DHCP
+# Starvation and Rogue Server Detection".
+dhcp:
+  enabled: true
+  starvation_max_clients: 20 # distinct client MACs from one source MAC within the window
+  starvation_window_seconds: 30
+  trusted_servers: [] # legitimate DHCP server IPs -- strongly recommended, see README.md
+  learn_trusted_server: true # with no trusted_servers, trust the first server seen while learning
+  learning_seconds: 120
+  alert_on_multiple_servers: true # with nothing trusted/learned, alert when a 2nd server answers
+  server_window_seconds: 300
+  cooldown: 60 # seconds before re-alerting on the same source MAC / server (per event type)
+
+# Example dhcp block for a network with a known DHCP server pair (e.g. a
+# router plus a failover server) -- list both, which also turns learning
+# off, and allow more headroom for a wireless repeater/bridge that forwards
+# many clients' DHCP requests under its own MAC:
+# dhcp:
+#   enabled: true
+#   starvation_max_clients: 40
+#   starvation_window_seconds: 30
+#   trusted_servers:
+#     - "192.168.1.1"
+#     - "192.168.1.2"
+#   cooldown: 120
+
 # IP whitelist: packets whose source IP matches an entry here skip detection
 # entirely. Entries can be exact IPs or CIDR ranges.
 # whitelist:

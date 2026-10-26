@@ -33,7 +33,9 @@ logger = logging.getLogger("netsentry.notifications")
 # treated like port scans: headers only, so it's repeated connection
 # attempts, not confirmed failed logins. ICMP floods and ping sweeps are
 # treated like port scans too; oversized pings (ICMP_OVERSIZED) aren't
-# critical at all -- a single big ping is often just a path-MTU test.
+# critical at all -- a single big ping is often just a path-MTU test. DHCP
+# starvation and rogue DHCP servers are layer-2 attacks like ARP spoofing
+# (denial of service / a malicious gateway or DNS for MITM), ranked the same.
 CRITICAL_EVENT_TYPES = {
     "SYN_FLOOD",
     "ARP_SPOOF",
@@ -45,6 +47,8 @@ CRITICAL_EVENT_TYPES = {
     "BRUTE_FORCE",
     "ICMP_FLOOD",
     "PING_SWEEP",
+    "DHCP_STARVATION",
+    "ROGUE_DHCP_SERVER",
 }
 
 # Relative ranking within CRITICAL_EVENT_TYPES, low to high -- formalizes the
@@ -60,6 +64,8 @@ EVENT_SEVERITY: Dict[str, str] = {
     "TRAFFIC_ANOMALY": "medium",
     "ML_ANOMALY": "medium",
     "ARP_SPOOF": "high",
+    "DHCP_STARVATION": "high",
+    "ROGUE_DHCP_SERVER": "high",
     "DNS_TUNNEL": "high",
     "TLS_ANOMALY": "high",
     "SYN_FLOOD": "critical",

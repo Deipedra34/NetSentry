@@ -117,6 +117,8 @@
   .badge.ICMP_FLOOD { background: rgba(255,140,105,0.15); color: #ff8c69; }
   .badge.PING_SWEEP { background: rgba(125,211,252,0.15); color: #7dd3fc; }
   .badge.ICMP_OVERSIZED { background: rgba(176,160,144,0.15); color: #b0a090; }
+  .badge.DHCP_STARVATION { background: rgba(199,146,234,0.15); color: #c792ea; }
+  .badge.ROGUE_DHCP_SERVER { background: rgba(247,140,108,0.15); color: #f78c6c; }
   .charts-header {
     display: flex;
     align-items: center;
@@ -321,6 +323,8 @@ const TYPE_COLORS = {
   ICMP_FLOOD: "#ff8c69",
   PING_SWEEP: "#7dd3fc",
   ICMP_OVERSIZED: "#b0a090",
+  DHCP_STARVATION: "#c792ea",
+  ROGUE_DHCP_SERVER: "#f78c6c",
 };
 const css = getComputedStyle(document.documentElement);
 const MUTED = css.getPropertyValue("--muted").trim();

@@ -18,6 +18,7 @@ from src.detectors import (
     ArpSpoofDetector,
     BruteForceDetector,
     Detector,
+    DHCPDetector,
     DNSTunnelDetector,
     DosDetector,
     ICMPDetector,
@@ -44,6 +45,7 @@ DETECTOR_NAMES = (
     "ml_anomaly",
     "brute_force",
     "icmp",
+    "dhcp",
 )
 
 
@@ -155,6 +157,20 @@ def build_detectors(config: Config, enabled: List[str] | None = None) -> List[De
                 flag_large_packets=config.icmp.flag_large_packets,
                 large_packet_bytes=config.icmp.large_packet_bytes,
                 cooldown=config.icmp.cooldown,
+            )
+        )
+    if wants("dhcp", config.dhcp.enabled):
+        detectors.append(
+            DHCPDetector(
+                starvation_max_clients=config.dhcp.starvation_max_clients,
+                starvation_window_seconds=config.dhcp.starvation_window_seconds,
+                trusted_servers=config.dhcp.trusted_servers,
+                learn_trusted_server=config.dhcp.learn_trusted_server,
+                learning_seconds=config.dhcp.learning_seconds,
+                alert_on_multiple_servers=config.dhcp.alert_on_multiple_servers,
+                server_window_seconds=config.dhcp.server_window_seconds,
+                cooldown=config.dhcp.cooldown,
+                whitelist=config.whitelist,
             )
         )
 

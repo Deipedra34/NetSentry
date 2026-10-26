@@ -207,6 +207,32 @@ class IcmpConfig:
 
 
 @dataclass
+class DhcpConfig:
+    """Thresholds for DHCP starvation / rogue DHCP server detection -- see
+    src/detectors.py (DHCPDetector)."""
+
+    enabled: bool = True
+    # distinct client MACs (DHCP chaddr) in DISCOVER/REQUEST messages from
+    # one Ethernet source MAC within starvation_window_seconds that trigger
+    # a starvation alert
+    starvation_max_clients: int = 20
+    starvation_window_seconds: int = 30
+    # legitimate DHCP server IPs; any other server answering is a rogue
+    trusted_servers: List[str] = field(default_factory=list)
+    # with no trusted_servers, trust the first server seen in the first
+    # learning_seconds of capture -- never used when trusted_servers is set
+    learn_trusted_server: bool = True
+    learning_seconds: int = 120
+    # with nothing trusted (or learned), alert once more than one distinct
+    # server answers within server_window_seconds
+    alert_on_multiple_servers: bool = True
+    server_window_seconds: int = 300
+    # seconds to wait before re-alerting on the same source MAC / server,
+    # tracked separately per event type
+    cooldown: float = 60.0
+
+
+@dataclass
 class DatabaseConfig:
     """SQLite event database settings."""
 
@@ -371,6 +397,7 @@ class Config:
     ml_anomaly: MlAnomalyConfig = field(default_factory=MlAnomalyConfig)
     brute_force: BruteForceConfig = field(default_factory=BruteForceConfig)
     icmp: IcmpConfig = field(default_factory=IcmpConfig)
+    dhcp: DhcpConfig = field(default_factory=DhcpConfig)
     # source IPs/CIDR ranges that skip detection entirely, see src/engine.py
     whitelist: List[str] = field(default_factory=list)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
