@@ -61,7 +61,7 @@ def _parse_dhcp(packet: Any, info: PacketInfo) -> None:
     info.dhcp_server_id = server_id
 
 
-def parse_packet(packet: object) -> Optional[PacketInfo]:
+def parse_packet(packet: Any) -> Optional[PacketInfo]:
     """Converts a raw scapy packet (from sniff()'s prn callback usually) into
     our PacketInfo format. Returns None if packet is empty/None -- shouldn't
     normally happen but better safe.
