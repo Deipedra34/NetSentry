@@ -36,6 +36,8 @@ logger = logging.getLogger("netsentry.notifications")
 # critical at all -- a single big ping is often just a path-MTU test. DHCP
 # starvation and rogue DHCP servers are layer-2 attacks like ARP spoofing
 # (denial of service / a malicious gateway or DNS for MITM), ranked the same.
+# Beaconing (regular callbacks to one destination) points at C2 traffic like
+# DNS tunneling and TLS anomalies do, and is ranked the same.
 CRITICAL_EVENT_TYPES = {
     "SYN_FLOOD",
     "ARP_SPOOF",
@@ -49,6 +51,7 @@ CRITICAL_EVENT_TYPES = {
     "PING_SWEEP",
     "DHCP_STARVATION",
     "ROGUE_DHCP_SERVER",
+    "BEACONING",
 }
 
 # Relative ranking within CRITICAL_EVENT_TYPES, low to high -- formalizes the
@@ -68,6 +71,7 @@ EVENT_SEVERITY: Dict[str, str] = {
     "ROGUE_DHCP_SERVER": "high",
     "DNS_TUNNEL": "high",
     "TLS_ANOMALY": "high",
+    "BEACONING": "high",
     "SYN_FLOOD": "critical",
 }
 

@@ -21,7 +21,7 @@ database, and surfaces them on a self-refreshing Flask dashboard.
 
 ## Features
 
-NetSentry ships with ten independent detectors, each individually
+NetSentry ships with eleven independent detectors, each individually
 configurable and individually toggleable:
 
 | Detector | What it catches | Signal |
@@ -36,6 +36,7 @@ configurable and individually toggleable:
 | **Brute-Force Login Attempts** | Password guessing against SSH, RDP, FTP, Telnet, SMB, MySQL, PostgreSQL, VNC (and optionally HTTP/HTTPS) | ≥ *N* new TCP connection attempts (SYN only) from one source IP to one host:port within *T* seconds, or to many hosts/services at once (credential spraying) |
 | **ICMP Flood / Ping Sweep** | ICMP echo floods, ping sweeps (host discovery / reconnaissance), and oversized pings | ≥ *N* ICMP echo requests from one source IP within *T* seconds (flood), echo requests to ≥ *N* distinct hosts within *T* seconds (sweep), and/or a single echo request over a size limit |
 | **DHCP Starvation / Rogue DHCP Server** | Address-pool exhaustion attacks, and unauthorized DHCP servers handing out leases | DISCOVER/REQUEST messages for ≥ *N* distinct client MACs from one Ethernet source within *T* seconds (starvation), and/or an OFFER/ACK from a server that isn't trusted (rogue server) |
+| **Beaconing (C2 Callbacks)** | Malware checking in with its command-and-control server at regular intervals | ≥ *N* new connections from one host to the same destination IP and port whose intervals are nearly constant (coefficient of variation ≤ a jitter threshold), tolerating missed beats and the odd outlier |
 
 Every detected event is persisted with a timestamp, source IP, event type,
 and a human-readable details string, and is immediately visible on the live
@@ -64,6 +65,7 @@ flowchart LR
         BF["BruteForceDetector"]
         ICMP["ICMPDetector"]
         DHCP["DHCPDetector"]
+        BEACON["BeaconingDetector"]
     end
 
     Engine --> PS
@@ -76,6 +78,7 @@ flowchart LR
     Engine --> BF
     Engine --> ICMP
     Engine --> DHCP
+    Engine --> BEACON
 
     PS -->|"Event"| DB[("SQLite\nnetsentry.db")]
     ARP -->|"Event"| DB
@@ -87,6 +90,7 @@ flowchart LR
     BF -->|"Event"| DB
     ICMP -->|"Event"| DB
     DHCP -->|"Event"| DB
+    BEACON -->|"Event"| DB
 
     Model[("data/ml_model.joblib\n(trained offline)")] -.loaded at startup.-> ML
     Train["scripts/train_ml_model.py"] -.saves.-> Model
@@ -143,7 +147,7 @@ netsentry/
 │   ├── engine.py                 # Wires detectors + database together
 │   ├── database.py               # SQLite event storage
 │   ├── logging_config.py         # Console + rotating file logging
-│   ├── detectors.py              # Detector interface + all ten detectors
+│   ├── detectors.py              # Detector interface + all eleven detectors
 │   ├── tls_parser.py             # Minimal TLS handshake parsing (JA3 + certs)
 │   ├── ml_features.py            # Per-source-IP traffic feature extraction
 │   ├── notifications.py          # Discord / Telegram / email alert dispatch
@@ -167,6 +171,7 @@ netsentry/
     ├── test_brute_force.py
     ├── test_icmp.py
     ├── test_dhcp.py
+    ├── test_beaconing.py
     ├── test_database.py
     ├── test_config.py
     ├── test_sniffer.py
@@ -484,7 +489,7 @@ sudo python main.py -i eth0 --detectors port_scan,dos
 ```
 
 Valid detector names: `port_scan`, `arp_spoof`, `dos`, `traffic_anomaly`,
-`dns_tunnel`, `tls_anomaly`, `brute_force`, `icmp`, `dhcp`.
+`dns_tunnel`, `tls_anomaly`, `brute_force`, `icmp`, `dhcp`, `beaconing`.
 
 ### Browse an existing database without capturing
 
@@ -620,8 +625,8 @@ A debug-level log line is emitted each time a packet is skipped this way.
 
 NetSentry can push critical alerts (SYN flood, ARP spoofing, traffic
 anomalies, port scans, DNS tunneling, TLS anomalies, brute-force login
-attempts, ICMP floods, ping sweeps, DHCP starvation, and rogue DHCP
-servers) out to Discord,
+attempts, ICMP floods, ping sweeps, DHCP starvation, rogue DHCP
+servers, and beaconing) out to Discord,
 Telegram, and/or email as they happen, in addition to logging them and
 writing them to the dashboard. All
 three channels are independently configurable under `notifications` in
@@ -678,7 +683,7 @@ notifications:
 
 NetSentry can automatically save the raw traffic around a critical event
 (SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling, TLS
-anomalies, brute-force login attempts, ICMP floods, ping sweeps, DHCP starvation, rogue DHCP servers) to a `.pcap` file, so you have the actual packets to dig into
+anomalies, brute-force login attempts, ICMP floods, ping sweeps, DHCP starvation, rogue DHCP servers, beaconing) to a `.pcap` file, so you have the actual packets to dig into
 later instead of just the one-line alert. It's configured under `pcap_export` in `config.yaml` and
 disabled by default — see the commented example already in the shipped
 `config.yaml`.
@@ -727,7 +732,7 @@ the default `.pcap` handler), or from the command line with `tcpdump -r` /
 
 NetSentry can automatically block the source IP behind a critical event
 (SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling, TLS
-anomalies, brute-force login attempts, ICMP floods, ping sweeps, DHCP starvation, or rogue DHCP servers, same as notifications/PCAP export) at the OS firewall level,
+anomalies, brute-force login attempts, ICMP floods, ping sweeps, DHCP starvation, rogue DHCP servers, or beaconing, same as notifications/PCAP export) at the OS firewall level,
 via `AutoBlocker` in `src/auto_block.py`. It's configured under `auto_block` in `config.yaml` and
 disabled by default — see the commented example already in the shipped
 `config.yaml`.
@@ -739,7 +744,8 @@ disabled by default — see the commented example already in the shipped
    (`low` / `medium` / `high` / `critical` — port scans, brute-force
    login attempts, ICMP floods, and ping sweeps are `low`, traffic
    anomalies `medium`, ARP spoofing, DNS tunneling, TLS anomalies, DHCP
-   starvation, and rogue DHCP servers `high`, SYN floods `critical`).
+   starvation, rogue DHCP servers, and beaconing `high`, SYN floods
+   `critical`).
 3. The source IP must **not** be on the `whitelist` — this is a hard rule,
    checked independently of any config, never overridden.
 4. The source IP must **not** be a private/local address (loopback,
@@ -1321,6 +1327,162 @@ segment are only visible there in their relayed, unicast form.
 
 ---
 
+## Beaconing (C2) Detection
+
+Once malware is running on a machine, it needs a way to receive orders. It
+usually can't accept incoming connections (the machine sits behind NAT or
+a firewall), so it calls out instead: every so often it connects to its
+command-and-control (C2) server, asks "anything for me?", and goes back to
+sleep. These check-ins are called **beacons**. A sleep timer is the
+simplest way to schedule them, so a host that's beaconing tends to contact
+the same destination over and over at a strikingly regular interval:
+every 60 seconds, every 5 minutes, all day long. NetSentry's
+`BeaconingDetector` (`src/detectors.py`) looks for exactly that rhythm.
+
+| Event type | Pattern | Example details |
+|---|---|---|
+| `BEACONING` | One host connecting to the same destination IP and port at nearly constant intervals | `Beaconing: 192.168.1.20 -> 203.0.113.9:443 every ~60s (jitter 4%, 31 connections over 30 min); median interval 60.0s, mean 60.2s, threshold 15%, 1 missed beat` |
+
+`BEACONING` is a critical event, ranked `high` like DNS tunneling and TLS
+anomalies, so it flows through notifications, PCAP export, threat
+intelligence enrichment, auto-block, and the dashboard charts exactly like
+every other detector's events.
+
+**How the regularity check works.**
+
+1. **Only new connections count.** For TCP that's a SYN without ACK, never
+   the packets of an established session, so one long download is one
+   connection, not thousands. UDP has no handshake, so the first packet to
+   a (source IP, destination IP, destination port) triple after at least a
+   second of silence starts a new connection.
+2. **Bursts collapse.** Connections to the same triple less than a second
+   apart count as one connection event, so an app that opens several
+   parallel sockets at each check-in is one beat, not several.
+3. **Intervals are measured.** Once a triple has `min_connections` events
+   within `observation_window_seconds`, the time between each pair of
+   consecutive events is measured. Intervals outside `min_interval_seconds`
+   to `max_interval_seconds` are dropped, so rapid bursts and very slow
+   patterns are ignored rather than counted against the beat.
+4. **Missed beats and outliers are tolerated.** The remaining intervals are
+   compared against their **median**. An interval close to the median is
+   on-beat. One close to two or three times the median is a beat (or two)
+   that never arrived, for example because the laptop was briefly offline,
+   and counts as on-beat too. An interval that fits neither, like a one-off
+   manual visit to the same site, is set aside instead of failing the whole
+   series. At least 80% of the intervals must be on-beat. "Close" means
+   within ±2× `max_jitter_ratio` of the median (±30% by default, capped at
+   ±50%).
+5. **Jitter decides.** The **coefficient of variation** of the on-beat
+   intervals (standard deviation divided by mean) is the *jitter*: 0% for a
+   perfect metronome, around 10% for a beat that wanders a few seconds
+   either way, 50% or more for ordinary human browsing. The triple alerts
+   when the jitter is at or below `max_jitter_ratio`.
+
+The statistics use Python's standard `statistics` module and are
+re-computed at most once every `evaluate_every_seconds` per triple, not on
+every packet.
+
+**What's skipped.**
+
+- Traffic where **both ends are internal** (private, loopback, link-local,
+  CGNAT and documentation ranges, broadcast, and multicast). Beaconing
+  detection is mainly about internal hosts calling out to the internet. Set
+  `include_internal: true` to check internal-to-internal traffic too, for
+  example a compromised host calling an internal pivot. Traffic with at
+  least one public end is always checked.
+- Ports in `ignore_ports`, on either end of the connection. The defaults
+  cover protocols that are periodic by nature: DNS (53), NTP (123), DHCP
+  (67/68), mDNS (5353) and SSDP (1900).
+- Destinations in `ignore_destinations` (exact IPs or CIDR ranges).
+- Whitelisted source IPs, which skip detection entirely as with every
+  detector.
+
+A `cooldown` (an hour by default) is tracked per (source IP, destination
+IP, destination port) triple, so an ongoing beacon is reported once per
+interval, and one beacon never hides a second one from the same host.
+Memory stays bounded under scanning or spoofed traffic: at most 10,000
+triples are tracked (the least recently active one is dropped first),
+triples with no new connection within the observation window are
+forgotten, and at most 1,000 connection times are kept per triple.
+
+**Auto-block and beaconing.** Beaconing events follow the existing
+`auto_block` rules with no special treatment. The event's source IP is the
+host doing the beaconing, so a block would cut that machine off, which may
+or may not be what you want for a machine that's possibly infected. In
+practice:
+
+- An internal source (the usual case) is a private address, and auto-block
+  never blocks private/local addresses. Beaconing from inside your network
+  is therefore alerted on, but never blocked. Threat intelligence lookups
+  skip private addresses the same way.
+- A public source (for example, NetSentry running on a host with a public
+  address, or an internet host contacting yours on a timer) is blocked
+  when `auto_block` is enabled and `min_severity` is `high` or lower, like
+  any other `high` event. If you don't want that, raise `min_severity` to
+  `critical`.
+
+The destination, which is the likely C2 server, appears in the event
+details but isn't looked up or blocked automatically: threat intelligence
+and auto-block only act on an event's source IP.
+
+Settings (under `beaconing` in `config.yaml`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Turn the detector on/off. |
+| `min_connections` | `12` | Connection events to one (source IP, destination IP, destination port) triple needed before it's evaluated at all. |
+| `observation_window_seconds` | `3600` | How far back connection timestamps are kept, in seconds. |
+| `max_jitter_ratio` | `0.15` | Maximum coefficient of variation (standard deviation / mean) of the intervals for them to count as regular. `0.15` = 15%. Also sets the on-beat tolerance band (±2× this value around the median). |
+| `min_interval_seconds` | `5` | Intervals shorter than this are ignored. |
+| `max_interval_seconds` | `900` | Intervals longer than this are ignored. |
+| `ignore_ports` | `[53, 123, 67, 68, 5353, 1900]` | Ports that are periodic by nature, skipped on either end of the connection. Setting this replaces the whole list. |
+| `ignore_destinations` | `[]` | Known periodic destinations, as exact IPs or CIDR ranges. |
+| `include_internal` | `false` | Also check traffic where both ends are internal. |
+| `evaluate_every_seconds` | `30` | Minimum time between two evaluations of the same triple. |
+| `cooldown` | `3600` | Seconds to wait before re-alerting on the same triple. |
+
+**Expect false positives, and tune them away.** Plenty of legitimate
+software also calls home on a timer: update checkers, cloud sync clients
+(OneDrive, Dropbox, Google Drive), chat and email apps polling for new
+messages, telemetry, antivirus signature checks, NTP, VPN keepalives, and
+monitoring or backup agents. The first days on a new network will surface
+some of these. Look at each alert, confirm the destination belongs to
+software you expect, and add it to `ignore_destinations` (a CIDR range
+covers a vendor with many addresses). Other tuning knobs:
+
+- **Raise `min_connections`** (and `observation_window_seconds` with it) to
+  only alert on beacons that have been running for longer. This means
+  fewer false positives, but slower detection.
+- **Lower `max_jitter_ratio`** to only flag near-perfect timers. Raise it
+  to catch beacons with some randomization, at the cost of more legitimate
+  pollers matching.
+- **Raise `max_interval_seconds`** to catch slow beacons (some malware
+  checks in only every 30-60 minutes). Raise `observation_window_seconds`
+  so that `min_connections` beats still fit inside it.
+- **Raise `cooldown`** if a known-but-not-yet-ignored beacon keeps
+  re-alerting.
+
+**Limitations.**
+
+- Modern C2 frameworks add random **jitter** to their sleep timer
+  precisely to defeat this kind of check. With a large jitter setting
+  (say 30-50%), the intervals stop looking regular, and this detector won't
+  catch them without loosening `max_jitter_ratio` to a level that also
+  matches lots of legitimate software. It reliably catches low-jitter
+  beacons, and it works best alongside
+  [TLS/HTTPS Anomaly Detection](#tlshttps-anomaly-detection) (known-bad
+  JA3 fingerprints and certificates) and
+  [Threat Intelligence Lookups](#threat-intelligence-lookups).
+- NetSentry inspects **headers only**. It sees when connections happen and
+  where they go, not what's inside them, so it can't tell a malicious
+  check-in from a legitimate poll by content. That's why every alert needs
+  a human look before acting on it.
+- Beacons sent through a shared proxy, or through a cloud or CDN front
+  (domain fronting), all appear to go to the proxy's or CDN's address. They
+  can be hidden among, or mistaken for, other traffic to that address.
+
+---
+
 ## Testing
 
 The full test suite runs entirely offline against synthetic packet data —
@@ -1346,7 +1508,7 @@ points, no real training run) rather than depending on
 
 ## How each detector works
 
-All ten live in `src/detectors.py`:
+All eleven live in `src/detectors.py`:
 
 - **Port Scan** (`PortScanDetector`): maintains a per-source-IP map of
   `{port: last_seen_timestamp}`, prunes entries older than the configured
@@ -1404,6 +1566,14 @@ All ten live in `src/detectors.py`:
   against the trusted (configured, whitelisted, or learned) servers. See
   [DHCP Starvation and Rogue Server Detection](#dhcp-starvation-and-rogue-server-detection)
   for tuning.
+- **Beaconing (C2)** (`BeaconingDetector`): keeps a per-(source IP,
+  destination IP, destination port) deque of new-connection times (TCP SYN,
+  or the first UDP packet after a gap, with bursts collapsed), and every
+  `evaluate_every_seconds` measures the intervals between them. Missed
+  beats and outliers are tolerated by comparing each interval against the
+  median. It alerts when the coefficient of variation of the on-beat
+  intervals is at or below `max_jitter_ratio`. See
+  [Beaconing (C2) Detection](#beaconing-c2-detection) for tuning.
 
 All detectors implement per-source cooldowns so a sustained attack produces
 one alert per cooldown period rather than one per packet.

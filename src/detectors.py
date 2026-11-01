@@ -12,10 +12,12 @@ from __future__ import annotations
 import ipaddress
 import logging
 import math
+import statistics
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict, deque
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, FrozenSet, List, Optional, Tuple, Union
 
 import joblib
 
@@ -38,6 +40,7 @@ __all__ = [
     "BruteForceDetector",
     "ICMPDetector",
     "DHCPDetector",
+    "BeaconingDetector",
 ]
 
 
@@ -1306,6 +1309,260 @@ class DHCPDetector(Detector):
             f"(no trusted servers configured); {seen_as}"
         )
         return self._alert(server, self.ROGUE_EVENT, server, now, details)
+
+
+@dataclass
+class _BeaconTrack:
+    """BeaconingDetector's state for one (src_ip, dst_ip, dst_port) triple."""
+
+    # start times of the connection events seen within the observation
+    # window, oldest first (bursts already collapsed into one)
+    events: Deque[float]
+    # last time a new connection (TCP SYN, or any UDP packet) was seen --
+    # what bursts are collapsed against and expiry keys off of
+    last_seen: float = float("-inf")
+    last_evaluated: float = float("-inf")
+
+
+def _is_internal(addr: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]) -> bool:
+    """True for anything that isn't a public unicast address: RFC1918,
+    loopback, link-local, CGNAT, documentation ranges, broadcast and
+    multicast (Python counts multicast as global, but mDNS/SSDP-style
+    chatter never leaves the local network)."""
+    return addr.is_multicast or not addr.is_global
+
+
+def _format_span(seconds: float) -> str:
+    """'45s', '31 min' or '5.5 h' -- whichever reads best."""
+    if seconds < 120:
+        return f"{seconds:.0f}s"
+    if seconds < 7200:
+        return f"{seconds / 60:.0f} min"
+    return f"{seconds / 3600:.1f} h"
+
+
+class BeaconingDetector(Detector):
+    """Flags hosts calling the same destination back at suspiciously regular
+    intervals -- the check-in pattern of malware polling its command-and-
+    control (C2) server for instructions.
+
+    Works per (source IP, destination IP, destination port) triple and only
+    counts *new* connections: TCP SYNs (ACK not set), and the first UDP
+    packet of a triple after BURST_GAP_SECONDS of silence. Connections to a
+    triple closer together than BURST_GAP_SECONDS collapse into one
+    connection event, so an app opening several parallel sockets is one
+    beat, not several.
+
+    Once a triple has `min_connections` events within
+    `observation_window_seconds` (re-checked at most every
+    `evaluate_every_seconds`), the intervals between consecutive events are
+    measured. Intervals outside [`min_interval_seconds`,
+    `max_interval_seconds`] are dropped; the rest are compared against their
+    median. An interval within the tolerance band around the median -- or
+    around a whole multiple of it, i.e. a missed beat -- is on-beat. If at
+    least MIN_ON_BEAT_RATIO of the intervals are on-beat, the coefficient of
+    variation (stdev / mean) of the on-beat intervals is the jitter, and the
+    triple alerts when it's at or below `max_jitter_ratio`. A single late
+    connection or one-off manual visit is left out instead of failing the
+    whole series.
+
+    Traffic with both ends internal is skipped unless `include_internal` is
+    on, as are `ignore_ports` (on either end) and `ignore_destinations`.
+    Cooldowns are per triple, so one beacon never hides another from the
+    same host.
+    """
+
+    name = "BEACONING"
+
+    # connections to one triple closer together than this are one event
+    BURST_GAP_SECONDS = 1.0
+    # share of in-range intervals that must be on-beat, and of
+    # min_connections - 1 that must be on-beat intervals
+    MIN_ON_BEAT_RATIO = 0.8
+    # the on-beat band is +/- this many times max_jitter_ratio around the
+    # median (roughly two standard deviations), capped at MAX_TOLERANCE so
+    # bands around neighbouring multiples of the median never meet
+    TOLERANCE_FACTOR = 2.0
+    MAX_TOLERANCE = 0.5
+    # same memory caps as BruteForceDetector: tracked triples (and cooldown
+    # entries) are capped, dropping the least recently active one first, so
+    # scanning or spoofed traffic can't grow memory without bound...
+    MAX_TRACKED_KEYS = 10_000
+    # ...and so are the connection events kept per triple
+    MAX_EVENTS_PER_KEY = 1_000
+
+    def __init__(
+        self,
+        min_connections: int = 12,
+        observation_window_seconds: float = 3600.0,
+        max_jitter_ratio: float = 0.15,
+        min_interval_seconds: float = 5.0,
+        max_interval_seconds: float = 900.0,
+        ignore_ports: Optional[List[int]] = None,
+        ignore_destinations: Optional[List[str]] = None,
+        include_internal: bool = False,
+        evaluate_every_seconds: float = 30.0,
+        cooldown: float = 3600.0,
+    ) -> None:
+        self.min_connections = min_connections
+        self.observation_window_seconds = observation_window_seconds
+        self.max_jitter_ratio = max_jitter_ratio
+        self.min_interval_seconds = min_interval_seconds
+        self.max_interval_seconds = max_interval_seconds
+        self.ignore_ports = {
+            int(port)
+            for port in (ignore_ports if ignore_ports is not None else [53, 123, 67, 68, 5353, 1900])
+        }
+        self._ignore_networks = [
+            ipaddress.ip_network(entry, strict=False) for entry in (ignore_destinations or [])
+        ]
+        self.include_internal = include_internal
+        self.evaluate_every_seconds = evaluate_every_seconds
+        self.cooldown = cooldown
+        self._tolerance = min(self.MAX_TOLERANCE, self.TOLERANCE_FACTOR * max_jitter_ratio)
+        self._min_on_beat = max(2, math.ceil(self.MIN_ON_BEAT_RATIO * (min_connections - 1)))
+        # per-triple cap never goes below the threshold, or nothing could fire
+        self._max_events = max(self.MAX_EVENTS_PER_KEY, min_connections)
+        # (src_ip, dst_ip, dst_port) -> state, least recently active first
+        self._tracks: Dict[Tuple[str, str, int], _BeaconTrack] = {}
+        # (src_ip, dst_ip, dst_port) -> last alert timestamp
+        self._last_alert: Dict[Tuple[str, str, int], float] = {}
+
+    def _touch(self, key: Tuple[str, str, int]) -> _BeaconTrack:
+        """self._tracks[key], created if missing. Re-inserts the key so dict
+        order doubles as least-recently-active-first, and evicts the oldest
+        key once the store is at MAX_TRACKED_KEYS."""
+        track = self._tracks.pop(key, None)
+        if track is None:
+            if len(self._tracks) >= self.MAX_TRACKED_KEYS:
+                del self._tracks[next(iter(self._tracks))]
+            track = _BeaconTrack(events=deque(maxlen=self._max_events))
+        self._tracks[key] = track
+        return track
+
+    def _expire_idle(self, now: float) -> None:
+        """Drops triples with no new connection within the observation
+        window -- they're kept least recently active first, so this stops at
+        the first one still active."""
+        cutoff = now - self.observation_window_seconds
+        while self._tracks:
+            oldest = next(iter(self._tracks))
+            if self._tracks[oldest].last_seen >= cutoff:
+                break
+            del self._tracks[oldest]
+
+    def _is_candidate(self, packet: PacketInfo) -> bool:
+        """New-connection packets of a triple worth tracking at all."""
+        if not packet.src_ip or not packet.dst_ip or packet.dst_port is None:
+            return False
+        if packet.protocol == "TCP":
+            if not packet.is_syn:
+                return False
+        elif packet.protocol != "UDP":
+            return False
+        if packet.dst_port in self.ignore_ports or packet.src_port in self.ignore_ports:
+            return False
+        try:
+            src = ipaddress.ip_address(packet.src_ip)
+            dst = ipaddress.ip_address(packet.dst_ip)
+        except ValueError:
+            return False
+        if not self.include_internal and _is_internal(src) and _is_internal(dst):
+            return False
+        return not any(dst in network for network in self._ignore_networks)
+
+    def process_packet(self, packet: PacketInfo) -> List[Event]:
+        """Records a new connection for this packet's triple and, at most
+        every `evaluate_every_seconds`, checks the triple's connection
+        intervals for a regular beat."""
+        if not self._is_candidate(packet):
+            return []
+
+        now = packet.timestamp
+        self._expire_idle(now)
+        key = (packet.src_ip, packet.dst_ip, packet.dst_port)
+        track = self._touch(key)
+        gap = now - track.last_seen
+        track.last_seen = max(track.last_seen, now)
+        if gap < self.BURST_GAP_SECONDS:
+            return []
+
+        events = track.events
+        events.append(now)
+        cutoff = now - self.observation_window_seconds
+        while events and events[0] < cutoff:
+            events.popleft()
+        if len(events) < self.min_connections:
+            return []
+        if now - track.last_evaluated < self.evaluate_every_seconds:
+            return []
+        last_alert = self._last_alert.get(key, float("-inf"))
+        if now - last_alert < self.cooldown:
+            return []
+
+        track.last_evaluated = now
+        beat = self._measure(list(events))
+        if beat is None:
+            return []
+        median, mean, jitter, missed, irregular = beat
+
+        self._last_alert.pop(key, None)
+        if len(self._last_alert) >= self.MAX_TRACKED_KEYS:
+            del self._last_alert[next(iter(self._last_alert))]
+        self._last_alert[key] = now
+        details = (
+            f"Beaconing: {packet.src_ip} -> {packet.dst_ip}:{packet.dst_port} every "
+            f"~{median:.0f}s (jitter {jitter:.0%}, {len(events)} connections over "
+            f"{_format_span(events[-1] - events[0])}); median interval {median:.1f}s, "
+            f"mean {mean:.1f}s, threshold {self.max_jitter_ratio:.0%}"
+        )
+        if missed:
+            details += f", {missed} missed beat{'s' if missed != 1 else ''}"
+        if irregular:
+            details += f", {irregular} irregular interval{'s' if irregular != 1 else ''} ignored"
+        return [
+            Event(
+                event_type=self.name,
+                source_ip=packet.src_ip,
+                details=details,
+                timestamp=to_datetime(now),
+            )
+        ]
+
+    def _measure(self, events: List[float]) -> Optional[Tuple[float, float, float, int, int]]:
+        """(median, mean, jitter, missed beats, irregular intervals) for a
+        series of connection times that beats regularly enough to alert on,
+        or None if it doesn't."""
+        intervals = [
+            later - earlier
+            for earlier, later in zip(events, events[1:])
+            if self.min_interval_seconds <= later - earlier <= self.max_interval_seconds
+        ]
+        if len(intervals) < self._min_on_beat:
+            return None
+
+        median = statistics.median(intervals)
+        if median <= 0:
+            return None
+        on_beat: List[float] = []
+        missed = 0
+        for interval in intervals:
+            # an interval near 2x, 3x... the median is a beat (or more) that
+            # never arrived -- normalize it back to one beat's worth
+            beats = max(1, round(interval / median))
+            if abs(interval / beats - median) <= self._tolerance * median:
+                on_beat.append(interval / beats)
+                missed += beats - 1
+        if len(on_beat) < self._min_on_beat:
+            return None
+        if len(on_beat) < self.MIN_ON_BEAT_RATIO * len(intervals):
+            return None
+
+        mean = statistics.mean(on_beat)
+        jitter = statistics.stdev(on_beat) / mean
+        if jitter > self.max_jitter_ratio:
+            return None
+        return median, mean, jitter, missed, len(intervals) - len(on_beat)
 
 
 def _normalize_ip(value: str) -> str:

@@ -233,6 +233,44 @@ class DhcpConfig:
 
 
 @dataclass
+class BeaconingConfig:
+    """Thresholds for beaconing (C2 callback) detection -- see
+    src/detectors.py (BeaconingDetector).
+
+    Only counts new connections (TCP SYN without ACK, or the first UDP
+    packet of a flow after a gap), never every packet of an established
+    session, and collapses bursts of parallel connections into one.
+    """
+
+    enabled: bool = True
+    # connection events to one (source IP, destination IP, destination
+    # port) triple needed before that triple is evaluated at all
+    min_connections: int = 12
+    # how far back connection timestamps are kept
+    observation_window_seconds: int = 3600
+    # max coefficient of variation (stdev / mean) of the intervals between
+    # connections for them to count as regular -- 0.15 = 15% jitter
+    max_jitter_ratio: float = 0.15
+    # only intervals within this range count, so rapid bursts and very slow
+    # patterns are ignored
+    min_interval_seconds: int = 5
+    max_interval_seconds: int = 900
+    # ports that are periodic by nature (DNS, NTP, DHCP, mDNS, SSDP), on
+    # either end of the connection
+    ignore_ports: List[int] = field(default_factory=lambda: [53, 123, 67, 68, 5353, 1900])
+    # known periodic destinations (IPs or CIDR ranges), e.g. update servers
+    # or monitoring systems
+    ignore_destinations: List[str] = field(default_factory=list)
+    # also check traffic where both ends are private/internal
+    include_internal: bool = False
+    # seconds between re-evaluations of one triple, so the statistics aren't
+    # recomputed on every packet
+    evaluate_every_seconds: int = 30
+    # seconds to wait before re-alerting on the same triple
+    cooldown: float = 3600.0
+
+
+@dataclass
 class DatabaseConfig:
     """SQLite event database settings."""
 
@@ -398,6 +436,7 @@ class Config:
     brute_force: BruteForceConfig = field(default_factory=BruteForceConfig)
     icmp: IcmpConfig = field(default_factory=IcmpConfig)
     dhcp: DhcpConfig = field(default_factory=DhcpConfig)
+    beaconing: BeaconingConfig = field(default_factory=BeaconingConfig)
     # source IPs/CIDR ranges that skip detection entirely, see src/engine.py
     whitelist: List[str] = field(default_factory=list)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)

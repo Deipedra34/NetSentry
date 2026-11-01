@@ -16,6 +16,7 @@ from src.config import Config
 from src.database import Database
 from src.detectors import (
     ArpSpoofDetector,
+    BeaconingDetector,
     BruteForceDetector,
     Detector,
     DHCPDetector,
@@ -46,6 +47,7 @@ DETECTOR_NAMES = (
     "brute_force",
     "icmp",
     "dhcp",
+    "beaconing",
 )
 
 
@@ -171,6 +173,21 @@ def build_detectors(config: Config, enabled: List[str] | None = None) -> List[De
                 server_window_seconds=config.dhcp.server_window_seconds,
                 cooldown=config.dhcp.cooldown,
                 whitelist=config.whitelist,
+            )
+        )
+    if wants("beaconing", config.beaconing.enabled):
+        detectors.append(
+            BeaconingDetector(
+                min_connections=config.beaconing.min_connections,
+                observation_window_seconds=config.beaconing.observation_window_seconds,
+                max_jitter_ratio=config.beaconing.max_jitter_ratio,
+                min_interval_seconds=config.beaconing.min_interval_seconds,
+                max_interval_seconds=config.beaconing.max_interval_seconds,
+                ignore_ports=config.beaconing.ignore_ports,
+                ignore_destinations=config.beaconing.ignore_destinations,
+                include_internal=config.beaconing.include_internal,
+                evaluate_every_seconds=config.beaconing.evaluate_every_seconds,
+                cooldown=config.beaconing.cooldown,
             )
         )
 

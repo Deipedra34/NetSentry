@@ -34,6 +34,7 @@ EVENT_TYPES: Tuple[str, ...] = (
     "ICMP_OVERSIZED",
     "DHCP_STARVATION",
     "ROGUE_DHCP_SERVER",
+    "BEACONING",
 )
 
 # ?range= value -> (window length, bucket size), both in seconds. Buckets are

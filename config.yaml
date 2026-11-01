@@ -223,6 +223,47 @@ dhcp:
 #     - "192.168.1.2"
 #   cooldown: 120
 
+# Beaconing (C2 callback) detection: a host connecting to the same
+# destination IP and port at suspiciously regular intervals, the way malware
+# checks in with its command-and-control server. Only new connections count
+# (TCP SYN, or the first UDP packet after a gap), and bursts of parallel
+# connections count once. Expect some legitimate software (update checkers,
+# cloud sync, chat apps, monitoring agents) to beacon too -- add those
+# destinations to ignore_destinations. See README.md "Beaconing (C2)
+# Detection".
+beaconing:
+  enabled: true
+  min_connections: 12 # connections to one source/destination/port before it's evaluated
+  observation_window_seconds: 3600 # how far back connection timestamps are kept
+  max_jitter_ratio: 0.15 # max stdev/mean of the intervals to count as regular (15%)
+  min_interval_seconds: 5 # intervals shorter than this are ignored (bursts)
+  max_interval_seconds: 900 # intervals longer than this are ignored (very slow patterns)
+  ignore_ports: [53, 123, 67, 68, 5353, 1900] # periodic by nature: DNS, NTP, DHCP, mDNS, SSDP
+  ignore_destinations: [] # known periodic destinations (IPs or CIDR ranges)
+  include_internal: false # also check traffic where both ends are private
+  evaluate_every_seconds: 30 # how often one source/destination/port is re-evaluated
+  cooldown: 3600 # seconds before re-alerting on the same source/destination/port
+
+# Example beaconing block after observing your own network for a while:
+# known periodic services are ignored, internal beaconing is checked too
+# (e.g. a compromised host calling an internal pivot), and the jitter
+# threshold is loosened slightly to catch beacons with some randomization
+# (at the cost of more false positives):
+# beaconing:
+#   enabled: true
+#   min_connections: 15
+#   observation_window_seconds: 7200
+#   max_jitter_ratio: 0.2
+#   min_interval_seconds: 10
+#   max_interval_seconds: 1800
+#   ignore_ports: [53, 123, 67, 68, 5353, 1900, 5355]
+#   ignore_destinations:
+#     - "192.168.1.10"     # internal monitoring server
+#     - "203.0.113.0/24"   # e.g. a vendor's update servers
+#   include_internal: true
+#   evaluate_every_seconds: 60
+#   cooldown: 7200
+
 # IP whitelist: packets whose source IP matches an entry here skip detection
 # entirely. Entries can be exact IPs or CIDR ranges.
 # whitelist:

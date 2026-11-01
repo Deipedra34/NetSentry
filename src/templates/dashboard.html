@@ -119,6 +119,7 @@
   .badge.ICMP_OVERSIZED { background: rgba(176,160,144,0.15); color: #b0a090; }
   .badge.DHCP_STARVATION { background: rgba(199,146,234,0.15); color: #c792ea; }
   .badge.ROGUE_DHCP_SERVER { background: rgba(247,140,108,0.15); color: #f78c6c; }
+  .badge.BEACONING { background: rgba(0,230,118,0.15); color: #00e676; }
   .charts-header {
     display: flex;
     align-items: center;
@@ -325,6 +326,7 @@ const TYPE_COLORS = {
   ICMP_OVERSIZED: "#b0a090",
   DHCP_STARVATION: "#c792ea",
   ROGUE_DHCP_SERVER: "#f78c6c",
+  BEACONING: "#00e676",
 };
 const css = getComputedStyle(document.documentElement);
 const MUTED = css.getPropertyValue("--muted").trim();
