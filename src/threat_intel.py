@@ -2,7 +2,8 @@
 
 ThreatIntelLookup enriches a critical event's details with what AbuseIPDB
 and/or VirusTotal know about its source IP (e.g. "AbuseIPDB: 87% confidence,
-42 reports | VirusTotal: 12/94 engines flagged malicious"), so the context
+42 reports | VirusTotal: 12/94 engines flagged malicious") -- and about its
+destination IP too, for events that set one (data exfiltration), so the context
 shows up everywhere details already do -- logs, notifications, dashboard.
 
 Both services have tight free-tier quotas, so every lookup goes through a
@@ -135,37 +136,54 @@ class ThreatIntelLookup:
         return services
 
     def enrich(self, event: Event, now: Optional[float] = None) -> Optional[ThreatIntelResult]:
-        """Appends threat intel for event.source_ip to event.details (and
-        to the stored event row, if it has an id) and returns the result
-        used, or None if no lookup applied. Never raises -- a failure in
-        one service is logged and the other is still queried."""
+        """Appends threat intel for event.source_ip -- and for
+        event.destination_ip, when a detector sets one -- to event.details
+        (and to the stored event row, if it has an id) and returns the
+        result used (the source's if there is one), or None if no lookup
+        applied. Never raises -- a failure in one service is logged and the
+        other is still queried."""
         if not self._services:
             return None
         if not self._meets_min_severity(event.event_type):
             return None
-        ip = event.source_ip
-        if self._is_whitelisted(ip):
-            logger.debug("Not looking up whitelisted source IP %s", ip)
-            return None
-        if not _is_lookup_candidate(ip):
-            logger.debug("Not looking up private/local/reserved source IP %s", ip)
-            return None
 
         current = now if now is not None else time.time()
-        result = self._get_fresh_cached(ip, current)
-        missing = [service for service in self._services if not self._has_data(result, service)]
-        if missing and self._should_query(ip, current):
-            result = self._query(ip, missing, result, current)
+        result = self._lookup(event.source_ip, "source", current)
+        if result is not None:
+            event.details = f"{event.details} [{format_summary(result)}]"
+        destination_result = None
+        if event.destination_ip and event.destination_ip != event.source_ip:
+            destination_result = self._lookup(event.destination_ip, "destination", current)
+            if destination_result is not None:
+                event.details = (
+                    f"{event.details} [destination {event.destination_ip}: "
+                    f"{format_summary(destination_result)}]"
+                )
 
-        if result is None:
+        if result is None and destination_result is None:
             return None
-        summary = format_summary(result)
-        if not summary:
-            return None
-
-        event.details = f"{event.details} [{summary}]"
         if event.id is not None:
             self.database.update_event_details(event.id, event.details)
+        return result or destination_result
+
+    def _lookup(self, ip: str, role: str, now: float) -> Optional[ThreatIntelResult]:
+        """The (cached or freshly queried) result for one IP, or None if it
+        isn't looked up at all or nothing came back. role ("source" or
+        "destination") is only used in log messages."""
+        if self._is_whitelisted(ip):
+            logger.debug("Not looking up whitelisted %s IP %s", role, ip)
+            return None
+        if not _is_lookup_candidate(ip):
+            logger.debug("Not looking up private/local/reserved %s IP %s", role, ip)
+            return None
+
+        result = self._get_fresh_cached(ip, now)
+        missing = [service for service in self._services if not self._has_data(result, service)]
+        if missing and self._should_query(ip, now):
+            result = self._query(ip, missing, result, now)
+
+        if result is None or not format_summary(result):
+            return None
         return result
 
     def _meets_min_severity(self, event_type: str) -> bool:

@@ -15,7 +15,7 @@ import math
 import statistics
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, FrozenSet, List, Optional, Tuple, Union
 
@@ -41,6 +41,7 @@ __all__ = [
     "ICMPDetector",
     "DHCPDetector",
     "BeaconingDetector",
+    "ExfiltrationDetector",
 ]
 
 
@@ -1563,6 +1564,344 @@ class BeaconingDetector(Detector):
         if jitter > self.max_jitter_ratio:
             return None
         return median, mean, jitter, missed, len(intervals) - len(on_beat)
+
+
+_MB = 1024 * 1024
+
+
+def _format_bytes(count: float) -> str:
+    """'512 KB', '4.2 MB', '412 MB' or '1.3 GB'."""
+    if count >= 1024 * _MB:
+        return f"{count / (1024 * _MB):.1f} GB"
+    if count >= 10 * _MB:
+        return f"{count / _MB:.0f} MB"
+    if count >= _MB:
+        return f"{count / _MB:.1f} MB"
+    return f"{count / 1024:.0f} KB"
+
+
+@dataclass
+class _ExfilDestination:
+    """Outbound bytes from one internal host to one external IP."""
+
+    # [bucket_start, outbound bytes] per BUCKET_SECONDS, oldest first
+    buckets: Deque[List[float]] = field(default_factory=deque)
+    # running sum of the buckets above
+    total: float = 0.0
+
+
+@dataclass
+class _ExfilHost:
+    """ExfiltrationDetector's state for one internal source IP."""
+
+    # [bucket_start, outbound bytes, inbound bytes] per BUCKET_SECONDS,
+    # oldest first, plus running sums of both
+    buckets: Deque[List[float]] = field(default_factory=deque)
+    outbound: float = 0.0
+    inbound: float = 0.0
+    # external dst_ip -> its share of the outbound bytes
+    destinations: Dict[str, _ExfilDestination] = field(default_factory=dict)
+    # baseline: consecutive window_seconds periods of outbound volume, and
+    # an exponentially weighted moving average of the non-alerting ones
+    period_start: Optional[float] = None
+    period_outbound: float = 0.0
+    period_alerted: bool = False
+    baseline: Optional[float] = None
+    baseline_samples: int = 0
+
+
+class ExfiltrationDetector(Detector):
+    """Flags an internal host sending an abnormally large amount of data to
+    external destinations -- data being stolen after a compromise.
+
+    A packet is outbound when its source is internal (private, loopback,
+    link-local...) and its destination public, and inbound the other way
+    round; internal-to-internal and public-to-public traffic is ignored.
+    Inbound only counts from external hosts the internal host has itself
+    sent to, which is what the out/in ratio is about. Volumes are kept per
+    internal source IP in BUCKET_SECONDS buckets over a sliding
+    `window_seconds` window -- total outbound, outbound per destination, and
+    inbound -- rather than per packet, so busy networks stay cheap. Four
+    conditions are checked, and the event names whichever fired:
+
+      1. volume: total outbound above `max_outbound_mb`
+      2. destination: outbound to one external IP above
+         `max_single_destination_mb`
+      3. ratio: outbound/inbound above `min_out_in_ratio`, once outbound
+         reaches `min_bytes_for_ratio` -- upload-heavy behaviour, which
+         normal browsing, downloads and streaming never are
+      4. baseline: outbound above `baseline_multiplier` times the host's own
+         moving average, once `baseline_min_samples` windows have been
+         learned (and outbound reaches `min_bytes_for_ratio`, so a host that
+         normally sends next to nothing can't trip it with a small upload)
+
+    The baseline is learned from consecutive `window_seconds` periods in
+    which the host sent anything (idle periods aren't learned, so a quiet
+    night doesn't make the morning look anomalous), and only from periods
+    in which no condition fired -- an ongoing exfiltration can't teach the
+    detector that it's normal.
+
+    One event type for all four; the source is the internal host and the
+    destination it sent the most to is named in the details (and set as
+    the event's destination_ip, for threat intel). Cooldowns are per
+    (source IP, condition), so a volume alert never hides a ratio alert.
+    """
+
+    name = "DATA_EXFILTRATION"
+
+    BUCKET_SECONDS = 10.0
+    # weight of the newest period in the baseline's moving average
+    BASELINE_ALPHA = 0.1
+    # same memory cap as BruteForceDetector: tracked source hosts (and
+    # cooldown entries) are capped, dropping the least recently active one
+    # first, so a flood of spoofed internal sources can't grow memory
+    # without bound...
+    MAX_TRACKED_SOURCES = 10_000
+    # ...and so are the destinations kept per host -- once full, the one
+    # with the least volume in the window makes way for a new one
+    MAX_DESTINATIONS_PER_SOURCE = 100
+
+    def __init__(
+        self,
+        window_seconds: float = 300.0,
+        max_outbound_mb: float = 100.0,
+        max_single_destination_mb: float = 50.0,
+        min_out_in_ratio: float = 10.0,
+        min_bytes_for_ratio: int = 10 * _MB,
+        baseline_enabled: bool = True,
+        baseline_multiplier: float = 5.0,
+        baseline_min_samples: int = 24,
+        ignore_destinations: Optional[List[str]] = None,
+        ignore_ports: Optional[List[int]] = None,
+        cooldown: float = 300.0,
+    ) -> None:
+        self.window_seconds = window_seconds
+        self.max_outbound_mb = max_outbound_mb
+        self.max_single_destination_mb = max_single_destination_mb
+        self.min_out_in_ratio = min_out_in_ratio
+        self.min_bytes_for_ratio = min_bytes_for_ratio
+        self.baseline_enabled = baseline_enabled
+        self.baseline_multiplier = baseline_multiplier
+        self.baseline_min_samples = baseline_min_samples
+        self._ignore_networks = [
+            ipaddress.ip_network(entry, strict=False) for entry in (ignore_destinations or [])
+        ]
+        self.ignore_ports = {int(port) for port in (ignore_ports or [])}
+        self.cooldown = cooldown
+        # internal src_ip -> state, least recently active first
+        self._hosts: Dict[str, _ExfilHost] = {}
+        # (src_ip, condition) -> last alert timestamp
+        self._last_alert: Dict[Tuple[str, str], float] = {}
+
+    def _is_ignored(
+        self, packet: PacketInfo, external: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
+    ) -> bool:
+        """ignore_ports on either end, or ignore_destinations covering the
+        external end."""
+        if packet.src_port in self.ignore_ports or packet.dst_port in self.ignore_ports:
+            return True
+        return any(external in network for network in self._ignore_networks)
+
+    def process_packet(self, packet: PacketInfo) -> List[Event]:
+        """Adds an outbound packet's bytes to its source host's window and
+        checks the four conditions; an inbound packet's bytes only feed the
+        out/in ratio."""
+        if packet.is_arp or not packet.src_ip or not packet.dst_ip:
+            return []
+        try:
+            src = ipaddress.ip_address(packet.src_ip)
+            dst = ipaddress.ip_address(packet.dst_ip)
+        except ValueError:
+            return []
+        src_internal = _is_internal(src)
+        if src_internal == _is_internal(dst):
+            return []
+        if self._is_ignored(packet, dst if src_internal else src):
+            return []
+        size = packet.ip_length or packet.length
+        if size <= 0:
+            return []
+
+        now = packet.timestamp
+        if not src_internal:
+            # inbound: only counts toward a host we're already tracking, from
+            # an external IP that host has sent to
+            host = self._hosts.get(packet.dst_ip)
+            if host is not None and packet.src_ip in host.destinations:
+                self._expire(host, now)
+                self._bucket(host, now)[2] += size
+                host.inbound += size
+            return []
+
+        host = self._touch(packet.src_ip)
+        self._close_period(host, now)
+        self._expire(host, now)
+        self._bucket(host, now)[1] += size
+        host.outbound += size
+        host.period_outbound += size
+        destination = self._destination(host, packet.dst_ip, now)
+        if destination.buckets and destination.buckets[-1][0] >= self._bucket_start(now):
+            destination.buckets[-1][1] += size
+        else:
+            destination.buckets.append([self._bucket_start(now), size])
+        destination.total += size
+        return self._check(packet.src_ip, host, destination, now)
+
+    def _touch(self, src_ip: str) -> _ExfilHost:
+        """self._hosts[src_ip], created if missing. Re-inserts the key so
+        dict order doubles as least-recently-active-first, and evicts the
+        oldest host once the store is at MAX_TRACKED_SOURCES."""
+        host = self._hosts.pop(src_ip, None)
+        if host is None:
+            if len(self._hosts) >= self.MAX_TRACKED_SOURCES:
+                del self._hosts[next(iter(self._hosts))]
+            host = _ExfilHost()
+        self._hosts[src_ip] = host
+        return host
+
+    def _bucket_start(self, now: float) -> float:
+        return math.floor(now / self.BUCKET_SECONDS) * self.BUCKET_SECONDS
+
+    def _bucket(self, host: _ExfilHost, now: float) -> List[float]:
+        """The host's bucket for now, started if needed. A packet older than
+        the newest bucket (capture threads aren't perfectly ordered) just
+        lands in the newest one."""
+        start = self._bucket_start(now)
+        if host.buckets and host.buckets[-1][0] >= start:
+            return host.buckets[-1]
+        bucket = [start, 0.0, 0.0]
+        host.buckets.append(bucket)
+        # a new bucket starts at most every BUCKET_SECONDS per host -- a
+        # cheap moment to also drop destinations that went quiet
+        cutoff = now - self.window_seconds
+        for dst_ip in list(host.destinations):
+            destination = host.destinations[dst_ip]
+            self._expire_destination(destination, cutoff)
+            if not destination.buckets:
+                del host.destinations[dst_ip]
+        return bucket
+
+    def _expire(self, host: _ExfilHost, now: float) -> None:
+        """Drops the host's buckets that started window_seconds or more ago."""
+        cutoff = now - self.window_seconds
+        while host.buckets and host.buckets[0][0] <= cutoff:
+            _, outbound, inbound = host.buckets.popleft()
+            host.outbound -= outbound
+            host.inbound -= inbound
+
+    @staticmethod
+    def _expire_destination(destination: _ExfilDestination, cutoff: float) -> None:
+        while destination.buckets and destination.buckets[0][0] <= cutoff:
+            destination.total -= destination.buckets.popleft()[1]
+
+    def _destination(self, host: _ExfilHost, dst_ip: str, now: float) -> _ExfilDestination:
+        """host.destinations[dst_ip], expired up to now, created if missing.
+        Once the host is at MAX_DESTINATIONS_PER_SOURCE, the destination
+        with the least volume in the window is dropped to make room, so the
+        top destinations are always the ones kept."""
+        destination = host.destinations.get(dst_ip)
+        if destination is None:
+            if len(host.destinations) >= self.MAX_DESTINATIONS_PER_SOURCE:
+                smallest = min(host.destinations, key=lambda ip: host.destinations[ip].total)
+                del host.destinations[smallest]
+            destination = host.destinations[dst_ip] = _ExfilDestination()
+        self._expire_destination(destination, now - self.window_seconds)
+        return destination
+
+    def _close_period(self, host: _ExfilHost, now: float) -> None:
+        """Ends the host's baseline period once window_seconds have passed
+        since it started, learning its volume unless it alerted. The next
+        period starts at this packet, so idle stretches are never learned."""
+        if host.period_start is not None and now - host.period_start < self.window_seconds:
+            return
+        if host.period_start is not None and not host.period_alerted:
+            if host.baseline is None:
+                host.baseline = host.period_outbound
+            else:
+                host.baseline += self.BASELINE_ALPHA * (host.period_outbound - host.baseline)
+            host.baseline_samples += 1
+        host.period_start = now
+        host.period_outbound = 0.0
+        host.period_alerted = False
+
+    def _check(
+        self, src_ip: str, host: _ExfilHost, destination: _ExfilDestination, now: float
+    ) -> List[Event]:
+        outbound = host.outbound
+        ratio = outbound / host.inbound if host.inbound > 0 else math.inf
+        ratio_text = "no inbound traffic" if math.isinf(ratio) else (
+            f"{ratio:.1f}" if ratio < 10 else f"{ratio:.0f}"
+        )
+        multiple: Optional[float] = None
+        if (
+            self.baseline_enabled
+            and host.baseline_samples >= self.baseline_min_samples
+            and host.baseline
+        ):
+            multiple = outbound / host.baseline
+
+        # (condition, the rule it broke) -- the measured values themselves
+        # go in the head of the details, since an alert fires on the packet
+        # that only just crosses a threshold
+        fired: List[Tuple[str, str]] = []
+        if outbound > self.max_outbound_mb * _MB:
+            fired.append(("volume", f"total volume over {self.max_outbound_mb:g} MB"))
+        if destination.total > self.max_single_destination_mb * _MB:
+            fired.append(
+                ("destination", f"over {self.max_single_destination_mb:g} MB to one destination")
+            )
+        if outbound >= self.min_bytes_for_ratio and ratio > self.min_out_in_ratio:
+            fired.append(("ratio", f"out/in ratio over {self.min_out_in_ratio:g}"))
+        if (
+            multiple is not None
+            and outbound >= self.min_bytes_for_ratio
+            and multiple > self.baseline_multiplier
+        ):
+            fired.append(("baseline", f"over {self.baseline_multiplier:g}x its baseline"))
+        if not fired:
+            return []
+
+        # any condition firing keeps this period out of the baseline, even
+        # while its alerts are on cooldown
+        host.period_alerted = True
+        fresh = [
+            (condition, text)
+            for condition, text in fired
+            if now - self._last_alert.get((src_ip, condition), float("-inf")) >= self.cooldown
+        ]
+        if not fresh:
+            return []
+        for condition, _ in fresh:
+            key = (src_ip, condition)
+            self._last_alert.pop(key, None)
+            if len(self._last_alert) >= self.MAX_TRACKED_SOURCES:
+                del self._last_alert[next(iter(self._last_alert))]
+            self._last_alert[key] = now
+
+        top_ip, top = max(host.destinations.items(), key=lambda item: item[1].total)
+        if len(host.destinations) == 1:
+            sent = f"sent {_format_bytes(outbound)} to {top_ip} in {self.window_seconds:.0f}s"
+        else:
+            sent = (
+                f"sent {_format_bytes(outbound)} to {len(host.destinations)} external hosts "
+                f"in {self.window_seconds:.0f}s, {_format_bytes(top.total)} of it to {top_ip}"
+            )
+        context = f"out/in ratio {ratio_text}"
+        if multiple is not None:
+            context += f", {multiple:.1f}x its baseline"
+        details = (
+            f"Possible exfiltration: {src_ip} {sent} ({context}); triggered: "
+            + "; ".join(text for _, text in fresh)
+        )
+        return [
+            Event(
+                event_type=self.name,
+                source_ip=src_ip,
+                details=details,
+                timestamp=to_datetime(now),
+                destination_ip=top_ip,
+            )
+        ]
 
 
 def _normalize_ip(value: str) -> str:

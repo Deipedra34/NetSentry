@@ -22,6 +22,7 @@ from src.detectors import (
     DHCPDetector,
     DNSTunnelDetector,
     DosDetector,
+    ExfiltrationDetector,
     ICMPDetector,
     MLAnomalyDetector,
     PortScanDetector,
@@ -48,6 +49,7 @@ DETECTOR_NAMES = (
     "icmp",
     "dhcp",
     "beaconing",
+    "exfiltration",
 )
 
 
@@ -188,6 +190,22 @@ def build_detectors(config: Config, enabled: List[str] | None = None) -> List[De
                 include_internal=config.beaconing.include_internal,
                 evaluate_every_seconds=config.beaconing.evaluate_every_seconds,
                 cooldown=config.beaconing.cooldown,
+            )
+        )
+    if wants("exfiltration", config.exfiltration.enabled):
+        detectors.append(
+            ExfiltrationDetector(
+                window_seconds=config.exfiltration.window_seconds,
+                max_outbound_mb=config.exfiltration.max_outbound_mb,
+                max_single_destination_mb=config.exfiltration.max_single_destination_mb,
+                min_out_in_ratio=config.exfiltration.min_out_in_ratio,
+                min_bytes_for_ratio=config.exfiltration.min_bytes_for_ratio,
+                baseline_enabled=config.exfiltration.baseline_enabled,
+                baseline_multiplier=config.exfiltration.baseline_multiplier,
+                baseline_min_samples=config.exfiltration.baseline_min_samples,
+                ignore_destinations=config.exfiltration.ignore_destinations,
+                ignore_ports=config.exfiltration.ignore_ports,
+                cooldown=config.exfiltration.cooldown,
             )
         )
 

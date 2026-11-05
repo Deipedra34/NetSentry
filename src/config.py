@@ -271,6 +271,47 @@ class BeaconingConfig:
 
 
 @dataclass
+class ExfiltrationConfig:
+    """Thresholds for data exfiltration detection -- see src/detectors.py
+    (ExfiltrationDetector).
+
+    Only internal-to-external traffic counts as outbound (external-to-
+    internal as inbound, for the out/in ratio); internal-to-internal
+    traffic is ignored. Megabytes here are 1024 * 1024 bytes.
+    """
+
+    enabled: bool = True
+    # sliding window outbound volume is measured over
+    window_seconds: int = 300
+    # outbound MB from one internal host to external destinations within
+    # window_seconds that trigger an alert
+    max_outbound_mb: float = 100.0
+    # outbound MB from one internal host to a single external IP within
+    # window_seconds that trigger an alert
+    max_single_destination_mb: float = 50.0
+    # outbound/inbound byte ratio above which volume counts as upload-heavy
+    # (guards against flagging normal downloads and streaming)...
+    min_out_in_ratio: float = 10.0
+    # ...once outbound reaches this many bytes (10 MB) -- also the minimum
+    # for the baseline check, to avoid noise on tiny transfers
+    min_bytes_for_ratio: int = 10485760
+    # also alert when a host's outbound volume is far above its own learned
+    # normal level: baseline_multiplier times its moving average, once
+    # baseline_min_samples windows have been learned
+    baseline_enabled: bool = True
+    baseline_multiplier: float = 5.0
+    baseline_min_samples: int = 24
+    # known heavy-upload destinations (IPs or CIDR ranges), e.g. backup
+    # services or cloud storage
+    ignore_destinations: List[str] = field(default_factory=list)
+    # ports to skip, on either end of the connection
+    ignore_ports: List[int] = field(default_factory=list)
+    # seconds to wait before re-alerting on the same source IP, tracked
+    # separately for each of the four conditions
+    cooldown: float = 300.0
+
+
+@dataclass
 class DatabaseConfig:
     """SQLite event database settings."""
 
@@ -437,6 +478,7 @@ class Config:
     icmp: IcmpConfig = field(default_factory=IcmpConfig)
     dhcp: DhcpConfig = field(default_factory=DhcpConfig)
     beaconing: BeaconingConfig = field(default_factory=BeaconingConfig)
+    exfiltration: ExfiltrationConfig = field(default_factory=ExfiltrationConfig)
     # source IPs/CIDR ranges that skip detection entirely, see src/engine.py
     whitelist: List[str] = field(default_factory=list)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)

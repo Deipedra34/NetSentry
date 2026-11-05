@@ -68,6 +68,12 @@ class PacketInfo:
     dhcp_chaddr: Optional[str] = None
     dhcp_server_id: Optional[str] = None
     length: int = 0
+    # the IPv4 header's total length field (IP header + payload, no
+    # Ethernet framing), when there is one -- see sniffer.py. Detectors that
+    # measure data volume prefer it over `length`, falling back to `length`
+    # when it's missing (non-IPv4, hand-built test packets) or 0 (some
+    # capture offloads leave it unset on large segments)
+    ip_length: Optional[int] = None
     # original Scapy packet object, if this PacketInfo came from a live
     # capture (sniffer.py sets it) -- None for hand-built test packets
     raw_packet: Optional[Any] = None

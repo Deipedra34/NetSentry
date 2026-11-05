@@ -264,6 +264,47 @@ beaconing:
 #   evaluate_every_seconds: 60
 #   cooldown: 7200
 
+# Data exfiltration detection: an internal host sending an abnormally large
+# amount of data to external (public) destinations -- a high total volume,
+# a lot to one destination, far more out than in (upload-heavy), or far
+# above that host's own learned normal level. Internal-to-internal traffic
+# is ignored. Cloud backups, video uploads, deployments and file sync
+# clients upload a lot too -- add those destinations to
+# ignore_destinations. See README.md "Data Exfiltration Detection".
+exfiltration:
+  enabled: true
+  window_seconds: 300 # sliding window outbound volume is measured over
+  max_outbound_mb: 100 # outbound MB from one host to all external destinations within the window
+  max_single_destination_mb: 50 # outbound MB from one host to a single external IP within the window
+  min_out_in_ratio: 10 # outbound/inbound byte ratio above which traffic counts as upload-heavy
+  min_bytes_for_ratio: 10485760 # outbound bytes (10 MB) before the ratio and baseline checks apply
+  baseline_enabled: true # also alert when a host sends far more than its own normal level
+  baseline_multiplier: 5.0 # times above the host's moving average that counts as anomalous
+  baseline_min_samples: 24 # windows learned before the baseline is trusted
+  ignore_destinations: [] # known heavy-upload destinations (IPs or CIDR ranges)
+  ignore_ports: [] # ports to skip, on either end of the connection
+  cooldown: 300 # seconds before re-alerting on the same source IP (per condition)
+
+# Example exfiltration block for an office where nightly backups go to a
+# known provider and a build server pushes large artifacts: those
+# destinations are ignored, the volume thresholds are raised, and the
+# baseline takes a full day of windows to learn before it's trusted:
+# exfiltration:
+#   enabled: true
+#   window_seconds: 600
+#   max_outbound_mb: 500
+#   max_single_destination_mb: 250
+#   min_out_in_ratio: 20
+#   min_bytes_for_ratio: 52428800 # 50 MB
+#   baseline_enabled: true
+#   baseline_multiplier: 8.0
+#   baseline_min_samples: 144 # 144 x 600s = 24h
+#   ignore_destinations:
+#     - "203.0.113.0/24"   # e.g. the backup provider's servers
+#     - "198.51.100.25"    # e.g. the artifact registry
+#   ignore_ports: [873] # rsync
+#   cooldown: 900
+
 # IP whitelist: packets whose source IP matches an entry here skip detection
 # entirely. Entries can be exact IPs or CIDR ranges.
 # whitelist:

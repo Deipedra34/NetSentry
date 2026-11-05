@@ -95,6 +95,7 @@ def parse_packet(packet: Any) -> Optional[PacketInfo]:
         ip = packet[IP]
         info.src_ip = ip.src
         info.dst_ip = ip.dst
+        info.ip_length = ip.len or None
 
         if TCP in packet:
             tcp = packet[TCP]

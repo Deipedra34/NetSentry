@@ -21,7 +21,7 @@ database, and surfaces them on a self-refreshing Flask dashboard.
 
 ## Features
 
-NetSentry ships with eleven independent detectors, each individually
+NetSentry ships with twelve independent detectors, each individually
 configurable and individually toggleable:
 
 | Detector | What it catches | Signal |
@@ -37,6 +37,7 @@ configurable and individually toggleable:
 | **ICMP Flood / Ping Sweep** | ICMP echo floods, ping sweeps (host discovery / reconnaissance), and oversized pings | ≥ *N* ICMP echo requests from one source IP within *T* seconds (flood), echo requests to ≥ *N* distinct hosts within *T* seconds (sweep), and/or a single echo request over a size limit |
 | **DHCP Starvation / Rogue DHCP Server** | Address-pool exhaustion attacks, and unauthorized DHCP servers handing out leases | DISCOVER/REQUEST messages for ≥ *N* distinct client MACs from one Ethernet source within *T* seconds (starvation), and/or an OFFER/ACK from a server that isn't trusted (rogue server) |
 | **Beaconing (C2 Callbacks)** | Malware checking in with its command-and-control server at regular intervals | ≥ *N* new connections from one host to the same destination IP and port whose intervals are nearly constant (coefficient of variation ≤ a jitter threshold), tolerating missed beats and the odd outlier |
+| **Data Exfiltration** | An internal host sending an abnormally large amount of data to external destinations | Outbound volume from one internal host within *T* seconds above a total limit, above a per-destination limit, far above what it receives (out/in ratio), and/or far above its own learned baseline |
 
 Every detected event is persisted with a timestamp, source IP, event type,
 and a human-readable details string, and is immediately visible on the live
@@ -66,6 +67,7 @@ flowchart LR
         ICMP["ICMPDetector"]
         DHCP["DHCPDetector"]
         BEACON["BeaconingDetector"]
+        EXFIL["ExfiltrationDetector"]
     end
 
     Engine --> PS
@@ -79,6 +81,7 @@ flowchart LR
     Engine --> ICMP
     Engine --> DHCP
     Engine --> BEACON
+    Engine --> EXFIL
 
     PS -->|"Event"| DB[("SQLite\nnetsentry.db")]
     ARP -->|"Event"| DB
@@ -91,6 +94,7 @@ flowchart LR
     ICMP -->|"Event"| DB
     DHCP -->|"Event"| DB
     BEACON -->|"Event"| DB
+    EXFIL -->|"Event"| DB
 
     Model[("data/ml_model.joblib\n(trained offline)")] -.loaded at startup.-> ML
     Train["scripts/train_ml_model.py"] -.saves.-> Model
@@ -147,7 +151,7 @@ netsentry/
 │   ├── engine.py                 # Wires detectors + database together
 │   ├── database.py               # SQLite event storage
 │   ├── logging_config.py         # Console + rotating file logging
-│   ├── detectors.py              # Detector interface + all eleven detectors
+│   ├── detectors.py              # Detector interface + all twelve detectors
 │   ├── tls_parser.py             # Minimal TLS handshake parsing (JA3 + certs)
 │   ├── ml_features.py            # Per-source-IP traffic feature extraction
 │   ├── notifications.py          # Discord / Telegram / email alert dispatch
@@ -172,6 +176,7 @@ netsentry/
     ├── test_icmp.py
     ├── test_dhcp.py
     ├── test_beaconing.py
+    ├── test_exfiltration.py
     ├── test_database.py
     ├── test_config.py
     ├── test_sniffer.py
@@ -489,7 +494,8 @@ sudo python main.py -i eth0 --detectors port_scan,dos
 ```
 
 Valid detector names: `port_scan`, `arp_spoof`, `dos`, `traffic_anomaly`,
-`dns_tunnel`, `tls_anomaly`, `brute_force`, `icmp`, `dhcp`, `beaconing`.
+`dns_tunnel`, `tls_anomaly`, `brute_force`, `icmp`, `dhcp`, `beaconing`,
+`exfiltration`.
 
 ### Browse an existing database without capturing
 
@@ -626,7 +632,7 @@ A debug-level log line is emitted each time a packet is skipped this way.
 NetSentry can push critical alerts (SYN flood, ARP spoofing, traffic
 anomalies, port scans, DNS tunneling, TLS anomalies, brute-force login
 attempts, ICMP floods, ping sweeps, DHCP starvation, rogue DHCP
-servers, and beaconing) out to Discord,
+servers, beaconing, and data exfiltration) out to Discord,
 Telegram, and/or email as they happen, in addition to logging them and
 writing them to the dashboard. All
 three channels are independently configurable under `notifications` in
@@ -683,7 +689,7 @@ notifications:
 
 NetSentry can automatically save the raw traffic around a critical event
 (SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling, TLS
-anomalies, brute-force login attempts, ICMP floods, ping sweeps, DHCP starvation, rogue DHCP servers, beaconing) to a `.pcap` file, so you have the actual packets to dig into
+anomalies, brute-force login attempts, ICMP floods, ping sweeps, DHCP starvation, rogue DHCP servers, beaconing, data exfiltration) to a `.pcap` file, so you have the actual packets to dig into
 later instead of just the one-line alert. It's configured under `pcap_export` in `config.yaml` and
 disabled by default — see the commented example already in the shipped
 `config.yaml`.
@@ -732,7 +738,7 @@ the default `.pcap` handler), or from the command line with `tcpdump -r` /
 
 NetSentry can automatically block the source IP behind a critical event
 (SYN flood, ARP spoofing, traffic anomalies, port scans, DNS tunneling, TLS
-anomalies, brute-force login attempts, ICMP floods, ping sweeps, DHCP starvation, rogue DHCP servers, or beaconing, same as notifications/PCAP export) at the OS firewall level,
+anomalies, brute-force login attempts, ICMP floods, ping sweeps, DHCP starvation, rogue DHCP servers, beaconing, or data exfiltration, same as notifications/PCAP export) at the OS firewall level,
 via `AutoBlocker` in `src/auto_block.py`. It's configured under `auto_block` in `config.yaml` and
 disabled by default — see the commented example already in the shipped
 `config.yaml`.
@@ -744,8 +750,8 @@ disabled by default — see the commented example already in the shipped
    (`low` / `medium` / `high` / `critical` — port scans, brute-force
    login attempts, ICMP floods, and ping sweeps are `low`, traffic
    anomalies `medium`, ARP spoofing, DNS tunneling, TLS anomalies, DHCP
-   starvation, rogue DHCP servers, and beaconing `high`, SYN floods
-   `critical`).
+   starvation, rogue DHCP servers, beaconing, and data exfiltration
+   `high`, SYN floods `critical`).
 3. The source IP must **not** be on the `whitelist` — this is a hard rule,
    checked independently of any config, never overridden.
 4. The source IP must **not** be a private/local address (loopback,
@@ -824,6 +830,18 @@ event's details, e.g.:
 
 ```
 ... [AbuseIPDB: 87% confidence, 42 reports | VirusTotal: 12/94 engines flagged malicious]
+```
+
+For events where the interesting address is the *destination* rather than
+the source, the destination is looked up too. Today that's
+[data exfiltration](#data-exfiltration-detection): the source is your own
+internal host (private, so never looked up), and the external IP the data
+went to is the one worth checking. Destination results are appended
+separately, under the same rules (public addresses only, never whitelisted
+ones, same cache and cooldown):
+
+```
+... [destination 198.51.100.7: AbuseIPDB: 87% confidence, 42 reports]
 ```
 
 That enriched text shows up everywhere event details already do — the log,
@@ -1422,8 +1440,9 @@ practice:
   `critical`.
 
 The destination, which is the likely C2 server, appears in the event
-details but isn't looked up or blocked automatically: threat intelligence
-and auto-block only act on an event's source IP.
+details but isn't looked up or blocked automatically. Auto-block only
+acts on an event's source IP, and threat intelligence only looks up a
+destination for events that name one (currently data exfiltration).
 
 Settings (under `beaconing` in `config.yaml`):
 
@@ -1483,6 +1502,146 @@ covers a vendor with many addresses). Other tuning knobs:
 
 ---
 
+## Data Exfiltration Detection
+
+Stealing data is often the whole point of an intrusion. At some point, a
+compromised machine has to push what it collected (documents, database
+dumps, credentials, source code) out to a server the attacker controls.
+That usually looks different from what the machine normally does: far
+more data going out than usual, a lot of it to one place, and much more
+sent than received. NetSentry's `ExfiltrationDetector`
+(`src/detectors.py`) measures exactly that, per internal host.
+
+| Event type | Pattern | Example details |
+|---|---|---|
+| `DATA_EXFILTRATION` | An internal host sending an abnormally large amount of data to external destinations | `Possible exfiltration: 192.168.1.20 sent 412 MB to 3 external hosts in 300s, 398 MB of it to 203.0.113.9 (out/in ratio 38, 6.2x its baseline); triggered: total volume over 100 MB; over 50 MB to one destination; out/in ratio over 10; over 5x its baseline` |
+
+`DATA_EXFILTRATION` is a critical event, ranked `high` like DNS tunneling
+(its covert counterpart), so it flows through notifications, PCAP export,
+threat intelligence enrichment, auto-block, and the dashboard charts
+exactly like every other detector's events. The event's source IP is the
+internal host. The destination it sent the most to is named in the details,
+and [threat intelligence](#threat-intelligence-lookups) looks up that
+destination, since it's the address worth knowing about.
+
+**What's measured.** A packet counts as **outbound** when its source is
+internal (private, loopback, link-local, and other non-public ranges) and
+its destination is a public address. It counts as **inbound** the other way
+round, but only from an external IP the internal host has itself sent data
+to. Internal-to-internal traffic (including multicast and broadcast) and
+public-to-public traffic are ignored. Each packet counts with its IP length
+(IP header plus payload), or the captured frame size when that isn't
+available. For each internal host, NetSentry keeps 10-second buckets of
+outbound bytes, outbound bytes per destination, and inbound bytes over a
+sliding `window_seconds` window, rather than a record of every packet.
+
+**The four conditions.** Any of these raises an event, and the details say
+which one(s) fired:
+
+1. **Total volume:** the host sent more than `max_outbound_mb` to external
+   destinations within the window.
+2. **Single destination:** the host sent more than
+   `max_single_destination_mb` to one external IP within the window.
+3. **Out/in ratio:** once the host has sent at least `min_bytes_for_ratio`,
+   it sent more than `min_out_in_ratio` times what it received from those
+   destinations. Browsing, downloads, streaming, and video calls all
+   receive at least as much as they send, so this is upload-heavy
+   behaviour by definition. A big download never trips it.
+4. **Baseline:** the host sent more than `baseline_multiplier` times its own
+   normal level for a window (see below), once the baseline is trusted.
+   This check also needs at least `min_bytes_for_ratio` outbound, so a host
+   that normally sends next to nothing can't trip it with an ordinary
+   upload.
+
+**How the baseline works.** Every host learns its own normal level. Its
+traffic is split into consecutive `window_seconds` periods, and the
+outbound volume of each completed period feeds an exponentially weighted
+moving average, so recent periods count most and old ones fade out. Only
+periods in which the host sent something are learned, so a quiet night
+doesn't make the next morning look anomalous. The baseline is only used
+once `baseline_min_samples` periods have been learned (two hours with the
+defaults). **A period in which any condition fired is never learned.**
+Otherwise a long-running exfiltration would gradually raise the baseline
+until the theft itself looked normal. The baseline lives in memory, so it
+starts over when NetSentry restarts.
+
+A per-source `cooldown` keeps an ongoing transfer to one alert per
+interval. It's tracked separately for each of the four conditions, so an
+upload that first trips the ratio check still raises a new alert when it
+grows past the single-destination limit. Memory stays bounded: at most
+10,000 internal hosts are tracked (the least recently active one is
+dropped first), and at most 100 destinations per host. When a host is at
+that limit, the destination with the least volume in the window makes room
+for a new one, so the biggest destinations are always kept. Buckets older
+than the window are dropped as new traffic arrives.
+
+**Auto-block and exfiltration.** Exfiltration events follow the existing
+`auto_block` rules with no special treatment. Their source is normally an
+internal host with a private address, and auto-block never blocks
+private/local addresses, so **auto-block won't act on these events, by
+design**: cutting off one of your own machines automatically is a decision
+to make by hand. The external destination isn't blocked automatically
+either, because auto-block only acts on an event's source IP. To stop an
+ongoing transfer, block the destination (or isolate the host) yourself.
+
+Settings (under `exfiltration` in `config.yaml`; a megabyte here is
+1,048,576 bytes):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Turn the detector on/off. |
+| `window_seconds` | `300` | Sliding window outbound volume is measured over, in seconds. Also the length of one baseline period. |
+| `max_outbound_mb` | `100` | Outbound megabytes from one internal host to all external destinations within the window that trigger an alert. |
+| `max_single_destination_mb` | `50` | Outbound megabytes from one internal host to a single external IP within the window that trigger an alert. |
+| `min_out_in_ratio` | `10` | Outbound/inbound byte ratio above which the traffic counts as upload-heavy. |
+| `min_bytes_for_ratio` | `10485760` | Outbound bytes (10 MB) before the ratio and baseline checks apply, to avoid noise on small transfers. |
+| `baseline_enabled` | `true` | Also alert when a host's outbound volume is far above its own learned normal level. |
+| `baseline_multiplier` | `5.0` | How many times above the host's moving average counts as anomalous. |
+| `baseline_min_samples` | `24` | Number of learned periods before the baseline is trusted. |
+| `ignore_destinations` | `[]` | Known heavy-upload destinations (exact IPs or CIDR ranges), such as backup services or cloud storage. |
+| `ignore_ports` | `[]` | Ports to skip, on either end of the connection. |
+| `cooldown` | `300` | Seconds to wait before re-alerting on the same source IP, per condition. |
+
+**Expect false positives, and tune them away.** Lots of legitimate
+activity sends large amounts of data out: cloud backups, uploads to video
+platforms, photo and file sync clients (OneDrive, Dropbox, Google Drive,
+iCloud), software deployments and container image pushes, large email
+attachments, and video conferencing with screen sharing. Watch the alerts
+for a while on your own network, then:
+
+- **Add known destinations to `ignore_destinations`.** Use a CIDR range for
+  a provider with many addresses, e.g. your backup provider or artifact
+  registry. Whitelist a host entirely (the global `whitelist`) only if
+  everything it sends is expected, such as a dedicated backup server.
+- **Raise `max_outbound_mb` and `max_single_destination_mb`** for hosts on
+  fast links that routinely move a lot of data.
+- **Raise `min_bytes_for_ratio` or `min_out_in_ratio`** if ordinary uploads
+  (a 20 MB attachment, a small file sync) keep tripping the ratio check.
+- **Tune the baseline:** raise `baseline_multiplier` if hosts with bursty
+  but normal traffic trip it, and raise `baseline_min_samples` (e.g. a full
+  day of periods) so the baseline has seen a whole working day before it's
+  trusted.
+- **Use `ignore_ports`** for upload protocols you expect, such as `873`
+  (rsync) to an offsite backup.
+
+**Limitations.**
+
+- NetSentry sees **volume and destinations, not content**. Most traffic is
+  encrypted anyway, so it can't tell a stolen database from a holiday
+  video. Every alert needs a human look before acting on it.
+- **Slow-and-low exfiltration isn't caught.** Data leaked a little at a
+  time, staying under every threshold and close to the host's normal level,
+  looks like normal traffic. DNS-based exfiltration is covered separately by
+  [DNS Tunneling Detection](#dns-tunneling-detection).
+- Traffic is counted **per packet seen on the monitored interface**. On a
+  saturated link, or when capture falls behind, packets are dropped before
+  NetSentry sees them, so volumes can be undercounted, never overcounted.
+  Uploads that don't pass the monitored interface (another network path,
+  or a VPN tunnel whose outer packets go to a single VPN server) are
+  invisible or show up as traffic to the VPN server.
+
+---
+
 ## Testing
 
 The full test suite runs entirely offline against synthetic packet data —
@@ -1508,7 +1667,7 @@ points, no real training run) rather than depending on
 
 ## How each detector works
 
-All eleven live in `src/detectors.py`:
+All twelve live in `src/detectors.py`:
 
 - **Port Scan** (`PortScanDetector`): maintains a per-source-IP map of
   `{port: last_seen_timestamp}`, prunes entries older than the configured
@@ -1574,6 +1733,14 @@ All eleven live in `src/detectors.py`:
   median. It alerts when the coefficient of variation of the on-beat
   intervals is at or below `max_jitter_ratio`. See
   [Beaconing (C2) Detection](#beaconing-c2-detection) for tuning.
+- **Data Exfiltration** (`ExfiltrationDetector`): for each internal host,
+  keeps 10-second buckets of outbound bytes to external destinations
+  (total and per destination) and inbound bytes back from them over a
+  sliding window, plus an exponentially weighted moving average of its
+  outbound volume per window. It alerts on high total volume, high volume
+  to one destination, a high out/in ratio, or volume far above the host's
+  own baseline. See
+  [Data Exfiltration Detection](#data-exfiltration-detection) for tuning.
 
 All detectors implement per-source cooldowns so a sustained attack produces
 one alert per cooldown period rather than one per packet.

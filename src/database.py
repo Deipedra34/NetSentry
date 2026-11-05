@@ -29,6 +29,11 @@ class Event:
     details: str
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     id: Optional[int] = None
+    # the remote end of the activity, for detectors where that's the
+    # interesting address (e.g. where data is being exfiltrated to) --
+    # in-memory only, so threat intel can look it up too; it isn't stored,
+    # the details string already names it
+    destination_ip: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """for jsonify() basically, converts to plain dict"""
