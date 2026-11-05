@@ -439,6 +439,21 @@ class ThreatIntelConfig:
 
 
 @dataclass
+class GeoIPConfig:
+    """Offline GeoIP lookups (country/city, optionally network owner) for
+    the IPs behind events -- see src/geoip.py. Disabled by default since
+    it needs a MaxMind-format database file the user downloads themselves
+    (MaxMind GeoLite2 or DB-IP Lite)."""
+
+    enabled: bool = False
+    # city or country database (GeoLite2-City/-Country, DB-IP City/Country Lite)
+    database_path: str = "data/GeoLite2-City.mmdb"
+    # optional ASN database (GeoLite2-ASN, DB-IP ASN Lite) for the network
+    # owner, e.g. "AS15169 Google LLC" -- empty means don't look it up
+    asn_database_path: str = ""
+
+
+@dataclass
 class WebConfig:
     """Flask dashboard settings."""
 
@@ -488,6 +503,7 @@ class Config:
     pcap_export: PcapExportConfig = field(default_factory=PcapExportConfig)
     auto_block: AutoBlockConfig = field(default_factory=AutoBlockConfig)
     threat_intel: ThreatIntelConfig = field(default_factory=ThreatIntelConfig)
+    geoip: GeoIPConfig = field(default_factory=GeoIPConfig)
 
 
 def _merge_dataclass(instance: Any, overrides: Dict[str, Any]) -> Any:

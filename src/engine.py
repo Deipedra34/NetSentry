@@ -29,6 +29,7 @@ from src.detectors import (
     TLSAnomalyDetector,
     TrafficAnomalyDetector,
 )
+from src.geoip import GeoIPLookup
 from src.notifications import NotificationDispatcher
 from src.packet_info import PacketInfo
 from src.pcap_export import PcapExporter
@@ -231,6 +232,7 @@ class DetectionEngine:
         pcap_exporter: PcapExporter | None = None,
         auto_blocker: AutoBlocker | None = None,
         threat_intel: ThreatIntelLookup | None = None,
+        geoip: GeoIPLookup | None = None,
     ) -> None:
         # detectors should already be built/configured by build_detectors() before
         # they get here, this class doesn't do any of that itself
@@ -241,6 +243,7 @@ class DetectionEngine:
         self.pcap_exporter = pcap_exporter
         self.auto_blocker = auto_blocker
         self.threat_intel = threat_intel
+        self.geoip = geoip
         self._packet_count = 0
         self._event_count = 0
 
@@ -293,6 +296,11 @@ class DetectionEngine:
                 self._event_count += 1
                 # runs before the alert log line + notifications so both
                 # carry the enriched details
+                if self.geoip is not None:
+                    try:
+                        self.geoip.enrich(event)
+                    except Exception:  # noqa: BLE001 - GeoIP failures must not affect capture
+                        logger.exception("GeoIPLookup raised an exception")
                 if self.threat_intel is not None:
                     try:
                         self.threat_intel.enrich(event)

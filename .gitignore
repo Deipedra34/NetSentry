@@ -53,6 +53,7 @@ netsentry.log
 *.pcap
 *.pcapng
 *.joblib
+*.mmdb
 
 # --- Environment / secrets ---
 .env

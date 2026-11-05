@@ -381,6 +381,17 @@ notifications:
 #     enabled: true
 #     api_key: "your-virustotal-api-key"
 
+# Offline GeoIP enrichment: appends the country/city (and, with an ASN
+# database, the network owner) of the public IPs behind each event to its
+# details -- the source, and the destination for beaconing / data
+# exfiltration. Disabled by default: download a free MaxMind GeoLite2 or
+# DB-IP Lite .mmdb file into data/ first. No network calls, no quota. See
+# README.md "GeoIP Enrichment".
+# geoip:
+#   enabled: true
+#   database_path: "data/GeoLite2-City.mmdb" # or dbip-city-lite-YYYY-MM.mmdb, or a Country database
+#   asn_database_path: "data/GeoLite2-ASN.mmdb" # optional -- leave empty to skip network owner lookups
+
 database:
   path: netsentry.db
 

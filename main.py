@@ -34,6 +34,7 @@ from src.auto_block import AutoBlocker
 from src.config import Config, load_config
 from src.database import Database
 from src.engine import DETECTOR_NAMES, DetectionEngine, build_detectors
+from src.geoip import GeoIPLookup
 from src.logging_config import setup_logging
 from src.notifications import NotificationDispatcher
 from src.pcap_export import PcapExporter
@@ -237,6 +238,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     pcap_exporter = PcapExporter(config)
     auto_blocker = AutoBlocker(config, database, whitelist=config.whitelist)
     threat_intel = ThreatIntelLookup(config, database, whitelist=config.whitelist)
+    geoip = GeoIPLookup(config, database)
     engine = DetectionEngine(
         database,
         detectors,
@@ -245,6 +247,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         pcap_exporter=pcap_exporter,
         auto_blocker=auto_blocker,
         threat_intel=threat_intel,
+        geoip=geoip,
     )
 
     if args.web:

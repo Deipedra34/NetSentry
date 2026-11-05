@@ -157,12 +157,14 @@ netsentry/
 │   ├── notifications.py          # Discord / Telegram / email alert dispatch
 │   ├── pcap_export.py            # Auto .pcap export of critical-event traffic
 │   ├── threat_intel.py           # AbuseIPDB / VirusTotal source IP lookups
+│   ├── geoip.py                  # Offline GeoIP (country/city/ASN) lookups
 │   ├── web.py                    # Flask app, JSON API, self-signed TLS setup
 │   └── templates/
 │       └── dashboard.html
 ├── data/
 │   ├── ja3_blocklist.txt         # User-supplied JA3 threat intel (empty by default)
-│   └── ml_model.joblib           # Trained MLAnomalyDetector model (not shipped, see below)
+│   ├── ml_model.joblib           # Trained MLAnomalyDetector model (not shipped, see below)
+│   └── GeoLite2-City.mmdb        # GeoIP database (not shipped, see "GeoIP Enrichment")
 └── tests/
     ├── conftest.py                # Shared fixtures / mock packet builder
     ├── test_port_scan.py
@@ -184,6 +186,7 @@ netsentry/
     ├── test_notifications.py
     ├── test_pcap_export.py
     ├── test_threat_intel.py
+    ├── test_geoip.py
     └── test_web_app.py
 ```
 
@@ -315,7 +318,7 @@ start, so a fresh clone works as-is.
 
 | Host path | Container path | What lives there |
 |---|---|---|
-| `./data/` | `/app/data` | SQLite database (`netsentry.db`: events, blocked IPs, threat-intel cache), trained ML model (`ml_model.joblib`), JA3 blocklist (`ja3_blocklist.txt`) |
+| `./data/` | `/app/data` | SQLite database (`netsentry.db`: events, blocked IPs, threat-intel cache), trained ML model (`ml_model.joblib`), JA3 blocklist (`ja3_blocklist.txt`), GeoIP databases (`*.mmdb`) |
 | `./captures/` | `/app/captures` | PCAP exports (when `pcap_export` is enabled) |
 | `./logs/` | `/app/logs` | Rotating log file (`netsentry.log`) |
 | `./config.yaml` | `/app/config.yaml` (read-only) | Configuration |
@@ -895,6 +898,76 @@ timeout. A bad API key, a rate limit (HTTP 429), a timeout or a network
 error is logged as a single warning. It never stops the other service from
 being queried and never interrupts packet capture; the event just goes out
 without that service's results.
+
+---
+
+## GeoIP Enrichment
+
+NetSentry can add where the public IPs behind an event are located, and who
+operates their network, to the event's details:
+
+```
+... [GeoIP: Frankfurt am Main, Germany (DE), AS24940 Hetzner Online GmbH]
+```
+
+For events that name a destination ([beaconing](#beaconing-c2-detection)
+and [data exfiltration](#data-exfiltration-detection)), the destination is
+looked up too. That's usually the more interesting end, since the source
+is your own internal host:
+
+```
+... [GeoIP destination 198.51.100.7: Ashburn, United States (US), AS14618 Amazon.com, Inc.]
+```
+
+Like threat intel, the enriched text shows up everywhere event details do:
+the log, notifications, and the dashboard. Lookups are handled by
+`GeoIPLookup` in `src/geoip.py`, and run right after an event is saved,
+before threat intelligence and notifications.
+
+Lookups run **entirely offline** against a database file on disk, so there
+are no API keys, no quotas and no network calls, and every event is
+enriched, not just critical ones. Private/local/reserved addresses are
+never looked up (they aren't in any GeoIP database anyway).
+
+**Getting a database.** This is **opt-in and disabled by default**, because
+NetSentry doesn't ship a database. You need a MaxMind-format `.mmdb` file,
+and two free options work out of the box:
+
+- **MaxMind GeoLite2** (<https://dev.maxmind.com/geoip/geolite2-free-geolocation-data>):
+  create a free account, then download **GeoLite2 City** (or Country) and,
+  optionally, **GeoLite2 ASN**. MaxMind's EULA applies.
+- **DB-IP Lite** (<https://db-ip.com/db/lite.php>): no account needed.
+  Download **IP to City Lite** (or Country Lite) and, optionally, **IP to
+  ASN Lite** in MMDB format. Licensed CC BY 4.0, so if you show its data
+  publicly, credit DB-IP.
+
+Put the files in `data/` (the Docker setup mounts that folder) and point
+`config.yaml` at them. Both providers update their databases monthly;
+replace the file and restart NetSentry to pick up a new one. `.mmdb` files
+are git-ignored, so they're never committed by accident.
+
+```yaml
+geoip:
+  enabled: true
+  database_path: "data/GeoLite2-City.mmdb"     # city or country database
+  asn_database_path: "data/GeoLite2-ASN.mmdb"  # optional; leave empty to skip
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Turn GeoIP enrichment on/off. |
+| `database_path` | `data/GeoLite2-City.mmdb` | City or country database (GeoLite2 City/Country, DB-IP City/Country Lite). A country database gives the country only. |
+| `asn_database_path` | `""` | Optional ASN database (GeoLite2 ASN, DB-IP ASN Lite) for the network owner, e.g. `AS15169 Google LLC`. |
+
+**Failures.** A missing or unreadable database file, or the `maxminddb`
+package not being installed, is logged as a warning once at startup, and
+GeoIP enrichment then does nothing for that run. It never stops packet
+capture. An address the database doesn't know just gets no GeoIP text.
+
+**Accuracy.** Free GeoIP databases are usually right about the country, but
+the city is often only approximate, and for cloud, VPN, and anycast
+addresses the location is where the provider registered the range, not
+where the machine is. Treat it as context, not proof.
 
 ---
 
