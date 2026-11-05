@@ -1370,7 +1370,8 @@ class BeaconingDetector(Detector):
     Traffic with both ends internal is skipped unless `include_internal` is
     on, as are `ignore_ports` (on either end) and `ignore_destinations`.
     Cooldowns are per triple, so one beacon never hides another from the
-    same host.
+    same host. The destination is set as the event's destination_ip, so
+    threat intel looks up the likely C2 server, not just the beaconing host.
     """
 
     name = "BEACONING"
@@ -1527,6 +1528,8 @@ class BeaconingDetector(Detector):
                 source_ip=packet.src_ip,
                 details=details,
                 timestamp=to_datetime(now),
+                # the likely C2 server -- what threat intel should look up
+                destination_ip=packet.dst_ip,
             )
         ]
 

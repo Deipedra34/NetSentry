@@ -834,9 +834,10 @@ event's details, e.g.:
 
 For events where the interesting address is the *destination* rather than
 the source, the destination is looked up too. Today that's
-[data exfiltration](#data-exfiltration-detection): the source is your own
+[data exfiltration](#data-exfiltration-detection) and
+[beaconing](#beaconing-c2-detection): the source is usually your own
 internal host (private, so never looked up), and the external IP the data
-went to is the one worth checking. Destination results are appended
+went to, or the likely C2 server, is the one worth checking. Destination results are appended
 separately, under the same rules (public addresses only, never whitelisted
 ones, same cache and cooldown):
 
@@ -1363,8 +1364,9 @@ every 60 seconds, every 5 minutes, all day long. NetSentry's
 
 `BEACONING` is a critical event, ranked `high` like DNS tunneling and TLS
 anomalies, so it flows through notifications, PCAP export, threat
-intelligence enrichment, auto-block, and the dashboard charts exactly like
-every other detector's events.
+intelligence enrichment (of the destination as well as the source),
+auto-block, and the dashboard charts exactly like every other detector's
+events.
 
 **How the regularity check works.**
 
@@ -1440,9 +1442,9 @@ practice:
   `critical`.
 
 The destination, which is the likely C2 server, appears in the event
-details but isn't looked up or blocked automatically. Auto-block only
-acts on an event's source IP, and threat intelligence only looks up a
-destination for events that name one (currently data exfiltration).
+details, and [threat intelligence](#threat-intelligence-lookups) looks it
+up when it's a public address. It isn't blocked automatically, because
+auto-block only acts on an event's source IP.
 
 Settings (under `beaconing` in `config.yaml`):
 

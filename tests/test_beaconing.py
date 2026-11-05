@@ -68,6 +68,7 @@ def test_perfectly_regular_beacon_alerts() -> None:
     event = events[0]
     assert event.event_type == "BEACONING"
     assert event.source_ip == HOST
+    assert event.destination_ip == C2
     assert event.details.startswith(
         f"Beaconing: {HOST} -> {C2}:443 every ~60s (jitter 0%, 12 connections over 11 min)"
     )
@@ -338,16 +339,20 @@ def test_internal_source_flows_through_pipeline_but_is_never_blocked(in_memory_d
         auto_blocker=AutoBlocker(config, in_memory_db),
         threat_intel=ThreatIntelLookup(config, in_memory_db),
     )
-    with patch("src.auto_block.subprocess.run") as mock_run, patch("src.threat_intel.requests.get") as mock_get:
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"data": {"abuseConfidenceScore": 87, "totalReports": 42}}
+    with patch("src.auto_block.subprocess.run") as mock_run, \
+            patch("src.threat_intel.requests.get", return_value=response) as mock_get:
         for packet in beacon(every(60.0, 12)):
             engine.handle_packet(packet)
     events = in_memory_db.get_events()
     assert [(e.event_type, e.source_ip) for e in events] == [("BEACONING", HOST)]
     assert notifier.notify.call_count == 1
     # the existing auto_block / threat intel rules: private sources are
-    # never blocked or looked up
+    # never blocked or looked up -- but the C2 destination is looked up
     mock_run.assert_not_called()
-    mock_get.assert_not_called()
+    assert [c.kwargs["params"]["ipAddress"] for c in mock_get.call_args_list] == [C2]
+    assert events[0].details.endswith(f"[destination {C2}: AbuseIPDB: 87% confidence, 42 reports]")
     assert in_memory_db.get_blocked_ips() == []
 
 
