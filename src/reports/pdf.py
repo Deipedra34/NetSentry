@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
+from functools import partial
 from typing import IO, Any, Dict, List, Optional, Tuple, Union
 from xml.sax.saxutils import escape
 
@@ -26,6 +27,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
     Flowable,
     KeepTogether,
@@ -454,6 +456,44 @@ def _notable_section(data: ReportData) -> List[Flowable]:
     ]
 
 
+class _FooterCanvas(Canvas):
+    """A canvas that holds every page back until the document is done, so
+    each page's footer can say "page X of Y"."""
+
+    def __init__(self, *args: Any, footer_left: str = "", footer_right: str = "", **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._footer_left = footer_left
+        self._footer_right = footer_right
+        self._pages: List[Dict[str, Any]] = []
+
+    def showPage(self) -> None:  # noqa: N802 - reportlab's name
+        self._pages.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self) -> None:
+        total = len(self._pages)
+        for page in self._pages:
+            self.__dict__.update(page)
+            self._draw_footer(total)
+            super().showPage()
+        super().save()
+
+    def _draw_footer(self, total: int) -> None:
+        width = PAGE_SIZE[0]
+        y = MARGIN / 2
+        self.saveState()
+        self.setStrokeColor(GRID)
+        self.setLineWidth(0.5)
+        self.line(MARGIN, y + 10, width - MARGIN, y + 10)
+        self.setFont("Helvetica", 7.5)
+        self.setFillColor(MUTED)
+        self.drawString(MARGIN, y, self._footer_left)
+        self.drawRightString(
+            width - MARGIN, y, f"{self._footer_right}  |  Page {self._pageNumber} of {total}"
+        )
+        self.restoreState()
+
+
 def build_story(data: ReportData) -> List[Flowable]:
     """Every section of the report, in order, as reportlab flowables."""
     story: List[Flowable] = []
@@ -490,4 +530,14 @@ def render_pdf(data: ReportData, target: Union[str, IO[bytes]]) -> None:
         creator=AUTHOR,
         subject=f"Detected events, {data.period.describe_range()}",
     )
-    document.build(build_story(data))
+    title = data.period.title
+    if len(title) > 70:
+        title = title[:67].rstrip() + "..."
+    document.build(
+        build_story(data),
+        canvasmaker=partial(
+            _FooterCanvas,
+            footer_left=title,
+            footer_right=f"Generated {data.generated_at.strftime('%Y-%m-%d %H:%M')}",
+        ),
+    )
