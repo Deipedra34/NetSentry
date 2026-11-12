@@ -146,6 +146,25 @@
     border-color: var(--accent);
     background: rgba(79,209,197,0.1);
   }
+  .charts-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.75rem;
+  }
+  .report-button {
+    background: var(--panel);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.25rem 0.8rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .report-button:hover { color: var(--accent); border-color: var(--accent); }
   .charts {
     display: grid;
     grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
@@ -183,10 +202,14 @@
 
   <div class="charts-header">
     <h2>Activity</h2>
-    <div class="range-selector" id="range-selector">
-      <button type="button" data-range="1h">1h</button>
-      <button type="button" data-range="24h" class="active">24h</button>
-      <button type="button" data-range="7d">7d</button>
+    <div class="charts-controls">
+      <div class="range-selector" id="range-selector">
+        <button type="button" data-range="1h">1h</button>
+        <button type="button" data-range="24h" class="active">24h</button>
+        <button type="button" data-range="7d">7d</button>
+      </div>
+      <a class="report-button" id="report-button" href="/api/report?range=24h" download
+         title="PDF summary report of the selected time range">Download report</a>
     </div>
   </div>
   <section class="charts">
@@ -461,6 +484,9 @@ document.getElementById("range-selector").addEventListener("click", (e) => {
   document.querySelectorAll("#range-selector button").forEach(b => {
     b.classList.toggle("active", b === button);
   });
+  // the report always covers the same range as the charts
+  document.getElementById("report-button").href =
+    `/api/report?range=${encodeURIComponent(currentRange)}`;
   refreshCharts();
 });
 
