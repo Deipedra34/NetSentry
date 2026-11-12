@@ -214,6 +214,7 @@ def run_web_dashboard(database: Database, config: Config, blocking: bool) -> Opt
         refresh_interval=config.web.refresh_interval,
         username=config.web.username,
         password=config.web.password,
+        reports_config=config.reports,
     )
 
     ssl_context = None

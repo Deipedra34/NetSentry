@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, Response, jsonify, render_template, request
 
+from src.config import ReportsConfig
 from src.database import Database
 
 # every event_type a detector can raise (the `name` of each class in
@@ -72,12 +73,14 @@ def create_app(
     refresh_interval: int = 5,
     username: str = "",
     password: str = "",
+    reports_config: Optional[ReportsConfig] = None,
 ) -> Flask:
     """Builds the Flask app. refresh_interval just gets passed through to the
     template so the JS knows how often to poll. username/password enable
     basic auth, but only if you set both -- leave either blank and auth is
     just off (fine for localhost-only use, wouldn't recommend exposing this
-    to the internet without at least setting these though).
+    to the internet without at least setting these though). reports_config
+    (the config's reports section) sizes the tables in /api/report's PDFs.
     """
     app = Flask(__name__)
     app.config["NETSENTRY_DB"] = database
@@ -197,6 +200,32 @@ def create_app(
                 "total_events": sum(by_type.values()),
                 "by_type": by_type,
             }
+        )
+
+    @app.route("/api/report")
+    def api_report() -> Any:
+        """A PDF summary report (see src/reports/) of the last ?range=: 1h,
+        24h (the default), 7d or 30d, as a file download -- what the
+        dashboard's "Download report" button fetches. Read-only, generated
+        on the fly; nothing is written to the reports folder."""
+        # imported here: src/reports reads EVENT_TYPES from this module
+        from src.reports import ROLLING_RANGES, report_bytes, rolling_period
+
+        range_key = request.args.get("range") or DEFAULT_STATS_RANGE
+        if range_key not in ROLLING_RANGES:
+            valid = ", ".join(ROLLING_RANGES)
+            return jsonify({"error": f"invalid range, expected one of: {valid}"}), 400
+
+        period = rolling_period(range_key)
+        try:
+            pdf = report_bytes(database, period, reports_config)
+        except Exception:  # noqa: BLE001 - a broken report must not take the dashboard down
+            app.logger.exception("Failed to generate a %s report", range_key)
+            return jsonify({"error": "report generation failed, see the NetSentry log"}), 500
+        return Response(
+            pdf,
+            mimetype="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{period.filename}"'},
         )
 
     @app.route("/api/blocked_ips")
