@@ -19,15 +19,23 @@ import math
 from typing import IO, Any, Dict, List, Optional, Tuple, Union
 from xml.sax.saxutils import escape
 
-from reportlab.graphics.charts.barcharts import HorizontalBarChart
+from reportlab.graphics.charts.barcharts import HorizontalBarChart, VerticalBarChart
 from reportlab.graphics.shapes import Drawing
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import Flowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    Flowable,
+    KeepTogether,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
-from src.reports.data import ReportData
+from src.reports.data import ReportData, Timeline
 
 AUTHOR = "NetSentry"
 PAGE_SIZE = A4
@@ -218,11 +226,86 @@ def _types_section(data: ReportData) -> List[Flowable]:
     return flowables
 
 
+# the most bucket labels the timeline's x axis shows before thinning them out
+MAX_TIMELINE_LABELS = 8
+
+
+def _bucket_label(timeline: Timeline, index: int) -> str:
+    start = timeline.starts[index]
+    if timeline.bucket_seconds <= 3600:
+        return start.strftime("%H:%M")
+    if timeline.bucket_seconds < 86400:
+        return start.strftime("%b %d\n%H:%M")
+    return start.strftime("%b %d")
+
+
+def _timeline_chart(timeline: Timeline) -> Drawing:
+    count = len(timeline.counts)
+    every = max(1, math.ceil(count / MAX_TIMELINE_LABELS))
+    drawing = Drawing(CONTENT_WIDTH, 158)
+    chart = VerticalBarChart()
+    chart.x = 30
+    chart.y = 36
+    chart.width = CONTENT_WIDTH - 40
+    chart.height = 110
+    chart.data = [timeline.counts]
+    chart.categoryAxis.categoryNames = [
+        _bucket_label(timeline, i) if i % every == 0 else "" for i in range(count)
+    ]
+    chart.categoryAxis.labels.fontName = "Helvetica"
+    chart.categoryAxis.labels.fontSize = 7
+    chart.categoryAxis.labels.boxAnchor = "n"
+    chart.categoryAxis.strokeColor = GRID
+    chart.categoryAxis.tickDown = 2
+    chart.valueAxis.strokeColor = GRID
+    chart.valueAxis.visibleGrid = True
+    chart.valueAxis.gridStrokeColor = GRID
+    chart.valueAxis.gridStrokeWidth = 0.25
+    _value_axis(chart.valueAxis, max(timeline.counts))
+    chart.bars[0].fillColor = ACCENT
+    chart.bars[0].strokeColor = None
+    chart.groupSpacing = 1 if count > 40 else 2
+    drawing.add(chart)
+    return drawing
+
+
+def _describe_bucket(seconds: int) -> str:
+    if seconds < 3600:
+        return f"{seconds // 60}-minute"
+    if seconds < 86400:
+        return "hourly" if seconds == 3600 else f"{seconds // 3600}-hour"
+    return "daily" if seconds == 86400 else "weekly"
+
+
+def _timeline_section(data: ReportData) -> List[Flowable]:
+    if data.is_empty:
+        return []
+    timeline = data.timeline
+    busiest = max(range(len(timeline.counts)), key=lambda i: timeline.counts[i])
+    return [
+        _heading("Event timeline"),
+        _timeline_chart(timeline),
+        Paragraph(
+            _text(
+                f"Events per {_describe_bucket(timeline.bucket_seconds)} bucket, times in "
+                f"the report's timezone. Busiest bucket: "
+                f"{timeline.starts[busiest].strftime('%Y-%m-%d %H:%M')} "
+                f"({timeline.counts[busiest]} events)."
+            ),
+            STYLES["note"],
+        ),
+    ]
+
+
 def build_story(data: ReportData) -> List[Flowable]:
     """Every section of the report, in order, as reportlab flowables."""
     story: List[Flowable] = []
-    for section in (_title_section, _summary_section, _types_section):
-        story.extend(section(data))
+    # (a section's heading always stays on the same page as what follows it)
+    for section in (_title_section, _summary_section, _types_section, _timeline_section):
+        flowables = section(data)
+        if flowables:
+            story.append(KeepTogether(flowables[:2]))
+        story.extend(flowables[2:])
     return story
 
 
