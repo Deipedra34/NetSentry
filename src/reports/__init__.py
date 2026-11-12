@@ -7,6 +7,8 @@ Split into the same layers as the rest of the codebase:
     no reportlab involved, so it's easy to test against a seeded database
   - pdf.py: lays that data out as a PDF with reportlab (tables plus charts
     from reportlab's own graphics module)
+  - generator.py: the entry point every report goes through -- collect the
+    data for a period, lay it out, write the file (or return the bytes)
   - scheduler.py: generates the daily/weekly reports when they're due and
     rotates old ones
 

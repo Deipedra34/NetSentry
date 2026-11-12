@@ -158,6 +158,11 @@ netsentry/
 │   ├── pcap_export.py            # Auto .pcap export of critical-event traffic
 │   ├── threat_intel.py           # AbuseIPDB / VirusTotal source IP lookups
 │   ├── geoip.py                  # Offline GeoIP (country/city/ASN) lookups
+│   ├── reports/                  # PDF summary reports (see "Reports")
+│   │   ├── data.py               # Report periods + read-only report queries
+│   │   ├── pdf.py                # reportlab layout: tables + charts
+│   │   ├── generator.py          # Collect, render and write a report
+│   │   └── scheduler.py          # Scheduled daily/weekly reports + rotation
 │   ├── web.py                    # Flask app, JSON API, self-signed TLS setup
 │   └── templates/
 │       └── dashboard.html
@@ -187,6 +192,13 @@ netsentry/
     ├── test_pcap_export.py
     ├── test_threat_intel.py
     ├── test_geoip.py
+    ├── test_report_periods.py
+    ├── test_report_data.py
+    ├── test_report_optional_data.py
+    ├── test_report_pdf.py
+    ├── test_report_cli.py
+    ├── test_report_web.py
+    ├── test_report_scheduler.py
     └── test_web_app.py
 ```
 
@@ -320,6 +332,7 @@ start, so a fresh clone works as-is.
 |---|---|---|
 | `./data/` | `/app/data` | SQLite database (`netsentry.db`: events, blocked IPs, threat-intel cache), trained ML model (`ml_model.joblib`), JA3 blocklist (`ja3_blocklist.txt`), GeoIP databases (`*.mmdb`) |
 | `./captures/` | `/app/captures` | PCAP exports (when `pcap_export` is enabled) |
+| `./reports/` | `/app/reports` | PDF reports: scheduled ones (when `reports.enabled` is on) and `--report` output |
 | `./logs/` | `/app/logs` | Rotating log file (`netsentry.log`) |
 | `./config.yaml` | `/app/config.yaml` (read-only) | Configuration |
 
@@ -529,6 +542,9 @@ python main.py --help
 --auto-block-dry-run    Force auto_block dry-run mode, overriding config.yaml
 --auto-block-live       Force auto_block live mode, overriding config.yaml
 --version               Print version and exit
+--report                daily | weekly | custom: write a PDF report and exit (no capture)
+--from, --to            Start/end of a custom report (ISO date or date-time, local time)
+--report-output         Write the report to this path instead of reports.output_dir
 ```
 
 ### Dashboard preview
@@ -968,6 +984,117 @@ capture. An address the database doesn't know just gets no GeoIP text.
 the city is often only approximate, and for cloud, VPN, and anycast
 addresses the location is where the provider registered the range, not
 where the machine is. Treat it as context, not proof.
+
+---
+
+## Reports
+
+NetSentry can sum up what it detected over a period as a PDF report, to
+read later, file away, or send to someone who doesn't want to dig through
+the dashboard. Reports are generated with [reportlab](https://www.reportlab.com/)
+(pure Python, charts included, no system libraries), straight from the
+events database.
+
+**What a report contains**
+
+- **Title** with the time range covered, and when the report was generated.
+- **Summary:** total events, critical events (the types NetSentry sends
+  notifications for), and distinct source IPs, each compared with the
+  previous period of the same length.
+- **Events by type:** a bar chart and a table with each type's share.
+- **Event timeline:** event volume across the period, in 5-minute, hourly,
+  6-hourly or daily buckets depending on its length.
+- **Top source IPs:** event counts and each IP's most common event type
+  (`top_n_sources` rows).
+- **Events by country**, when [GeoIP enrichment](#geoip-enrichment) has
+  located events.
+- **Threat intelligence:** IPs active in the period with notable
+  [AbuseIPDB / VirusTotal](#threat-intelligence-lookups) results
+  (confidence of 25% or more, or flagged malicious by at least one engine).
+- **Blocked IPs:** [auto-block](#automatic-blocking)'s current blocks, and
+  which of them were applied during the period. Blocks that were already
+  lifted again aren't kept anywhere, so they don't appear.
+- **Notable events:** critical events first, newest first, capped at
+  `max_notable_events`.
+
+Optional sections (countries, threat intel, blocked IPs) are left out when
+there's nothing to show, and a period with no events still produces a valid
+report that says so. Long event details are wrapped and cut off, so the
+layout never breaks. Every page has a footer with the report title, the
+generation time and the page number.
+
+**On demand, from the command line.** `--report` writes a report from the
+database and exits. It never starts packet capture, so it needs no
+privileges, just the database:
+
+```bash
+python main.py --report daily     # yesterday (local time)
+python main.py --report weekly    # the last 7 whole days
+python main.py --report custom --from 2026-11-01 --to 2026-11-07
+python main.py --report custom --from 2026-11-12T08:00            # until now
+python main.py --report daily --report-output ~/netsentry-yesterday.pdf
+```
+
+`--from` and `--to` take an ISO date or date-time in local time. A date on
+its own for `--to` includes that whole day, so the custom example above
+covers seven days. Reports go to `reports.output_dir` unless
+`--report-output` says otherwise, and the path of the written file is
+printed. With Docker, run it inside the container:
+`docker compose exec netsentry python main.py --report daily`.
+
+**From the dashboard.** The **Download report** button next to the chart
+range selector downloads a report for the selected range (1h, 24h or 7d,
+ending now). It's served by `/api/report?range=1h|24h|7d|30d`, which
+generates the PDF on the fly and doesn't write anything to disk.
+
+**On a schedule.** Set `reports.enabled: true` to have NetSentry write a
+daily and/or weekly report into `output_dir` on its own while it's
+capturing:
+
+```yaml
+reports:
+  enabled: true
+  output_dir: "reports/"
+  daily: true
+  daily_time: "08:00"      # local time
+  weekly: true
+  weekly_day: "monday"
+  weekly_time: "08:00"
+  max_notable_events: 20
+  top_n_sources: 10
+  keep_reports: 30
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Turn scheduled reports on. On-demand reports work regardless. |
+| `output_dir` | `reports/` | Where scheduled (and, by default, CLI) reports are written. |
+| `daily` / `daily_time` | `true` / `"08:00"` | Each day at this local time, write a report on the previous day: `report_daily_2026-11-11.pdf`. |
+| `weekly` / `weekly_day` / `weekly_time` | `true` / `"monday"` / `"08:00"` | Each week on this day and local time, write a report on the 7 days before it: `report_weekly_2026-11-02.pdf`. |
+| `max_notable_events` | `20` | Rows in the notable events table. |
+| `top_n_sources` | `10` | Rows in the top source IPs table. |
+| `keep_reports` | `30` | Keep this many scheduled reports and delete the oldest beyond that. `0` keeps them all. On-demand reports in the same folder are never deleted. |
+
+How the schedule works:
+
+- The schedule is checked about once a minute, piggybacking on packet
+  processing the same way auto-block's expiry check does, so there's no
+  extra thread. Scheduled reports are only written while NetSentry is
+  capturing (not with `--web-only`). On a very quiet network a report can
+  come a little later than its time, as soon as the next packet arrives.
+- Each report's filename comes from the period it covers, and a report
+  that already exists is never generated again, so restarting NetSentry
+  doesn't create duplicates. If NetSentry was down when a report was due,
+  the most recent missed daily and weekly reports are written once it's
+  back (older ones aren't backfilled; use `--report custom` for those).
+- If a report fails to generate (say, a full disk), a warning is logged and
+  it's tried again 15 minutes later. It never interrupts capture.
+- An invalid `daily_time`, `weekly_time` or `weekly_day` disables that
+  schedule with a warning at startup.
+
+The report folder is created automatically. In Docker it's the
+bind-mounted `./reports/` folder next to `docker-compose.yml` (see
+[Volume layout](#volume-layout)), and generated reports are git-ignored.
 
 ---
 
