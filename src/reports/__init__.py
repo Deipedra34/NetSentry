@@ -14,3 +14,31 @@ On-demand reports come from main.py (--report) and the dashboard's
 /api/report endpoint; scheduled ones from ReportScheduler, which the
 detection engine calls once per packet like AutoBlocker's expiry check.
 """
+
+from src.reports.data import (  # noqa: E402 - re-exported for callers
+    ROLLING_RANGES,
+    ReportPeriod,
+    custom_period,
+    daily_period,
+    rolling_period,
+    weekly_period,
+)
+from src.reports.generator import (  # noqa: E402
+    build_report_data,
+    default_report_path,
+    report_bytes,
+    write_report,
+)
+
+__all__ = [
+    "ROLLING_RANGES",
+    "ReportPeriod",
+    "build_report_data",
+    "custom_period",
+    "daily_period",
+    "default_report_path",
+    "report_bytes",
+    "rolling_period",
+    "weekly_period",
+    "write_report",
+]
