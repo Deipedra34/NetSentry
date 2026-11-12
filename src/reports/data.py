@@ -15,6 +15,9 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Dict, Optional
 
+from src.database import Database
+from src.web import EVENT_TYPES
+
 logger = logging.getLogger("netsentry.reports")
 
 # dashboard/API range key -> rolling period length ending now
@@ -135,3 +138,19 @@ def to_utc_iso(moment: datetime) -> str:
     """moment as the UTC isoformat string events are stored with, so plain
     string comparison against the timestamp column works."""
     return moment.astimezone(timezone.utc).isoformat()
+
+
+def _utc(moment: datetime) -> datetime:
+    return moment.astimezone(timezone.utc)
+
+
+def events_by_type(database: Database, period: ReportPeriod) -> Dict[str, int]:
+    """Event count per type within the period, in the order of the
+    dashboard's EVENT_TYPES (src/web.py, the authoritative list of every
+    type a detector can raise), zero-filled. A type in the database that
+    isn't in that list (e.g. from an older version) is appended at the end
+    rather than dropped."""
+    counts = database.event_type_counts(since=_utc(period.start), until=_utc(period.end))
+    by_type = {event_type: counts.pop(event_type, 0) for event_type in EVENT_TYPES}
+    by_type.update(sorted(counts.items()))
+    return by_type

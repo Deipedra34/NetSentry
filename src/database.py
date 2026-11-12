@@ -239,16 +239,25 @@ class Database:
             row = self._conn.execute("SELECT COUNT(*) AS c FROM events").fetchone()
         return int(row["c"])
 
-    def event_type_counts(self, since: Optional[datetime] = None) -> Dict[str, int]:
+    def event_type_counts(
+        self, since: Optional[datetime] = None, until: Optional[datetime] = None
+    ) -> Dict[str, int]:
         """counts per event_type, e.g. {"PORT_SCAN": 12, "SYN_FLOOD": 3}.
-        Pass since to only count events at or after that (UTC) time."""
+        Pass since to only count events at or after that (UTC) time, and
+        until to only count events before that (UTC) time."""
         query = "SELECT event_type, COUNT(*) AS c FROM events"
+        clauses: List[str] = []
         params: List[Any] = []
+        # timestamps are stored as UTC isoformat strings, so plain string
+        # comparison sorts them correctly
         if since is not None:
-            # timestamps are stored as UTC isoformat strings, so plain string
-            # comparison sorts them correctly
-            query += " WHERE timestamp >= ?"
+            clauses.append("timestamp >= ?")
             params.append(since.isoformat())
+        if until is not None:
+            clauses.append("timestamp < ?")
+            params.append(until.isoformat())
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " GROUP BY event_type"
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
