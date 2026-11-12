@@ -15,9 +15,12 @@ so long details can never push a table off the page.
 
 from __future__ import annotations
 
-from typing import IO, Any, Dict, List, Optional, Union
+import math
+from typing import IO, Any, Dict, List, Optional, Tuple, Union
 from xml.sax.saxutils import escape
 
+from reportlab.graphics.charts.barcharts import HorizontalBarChart
+from reportlab.graphics.shapes import Drawing
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -145,10 +148,80 @@ def _summary_section(data: ReportData) -> List[Flowable]:
     return flowables
 
 
+def _value_axis(axis: Any, maximum: int) -> None:
+    """Whole-number ticks from 0, about five of them -- event counts are
+    integers, so 0.5-steps would just be confusing."""
+    step = max(1, math.ceil(maximum / 5))
+    magnitude = 10 ** max(0, len(str(step)) - 1)
+    step = math.ceil(step / magnitude) * magnitude
+    axis.valueMin = 0
+    axis.valueStep = step
+    axis.valueMax = max(step, math.ceil(maximum / step) * step)
+    axis.labels.fontName = "Helvetica"
+    axis.labels.fontSize = 7
+    axis.labelTextFormat = "%d"
+
+
+def _type_chart(counts: List[Tuple[str, int]]) -> Drawing:
+    """Horizontal bars, busiest type at the top."""
+    bar_height = 13
+    label_width = 115
+    drawing = Drawing(CONTENT_WIDTH, len(counts) * bar_height + 24)
+    chart = HorizontalBarChart()
+    chart.x = label_width
+    chart.y = 16
+    chart.width = CONTENT_WIDTH - label_width - 25
+    chart.height = len(counts) * bar_height
+    # the category axis runs bottom-up, so reverse to put the busiest first
+    chart.data = [[count for _, count in reversed(counts)]]
+    chart.categoryAxis.categoryNames = [name for name, _ in reversed(counts)]
+    chart.categoryAxis.labels.fontName = "Helvetica"
+    chart.categoryAxis.labels.fontSize = 7
+    chart.categoryAxis.labels.boxAnchor = "e"
+    chart.categoryAxis.strokeColor = GRID
+    chart.valueAxis.strokeColor = GRID
+    _value_axis(chart.valueAxis, max(count for _, count in counts))
+    chart.bars[0].fillColor = ACCENT
+    chart.bars[0].strokeColor = None
+    chart.barLabelFormat = "%d"
+    chart.barLabels.fontName = "Helvetica"
+    chart.barLabels.fontSize = 7
+    chart.barLabels.boxAnchor = "w"
+    chart.barLabels.dx = 3
+    drawing.add(chart)
+    return drawing
+
+
+def _types_section(data: ReportData) -> List[Flowable]:
+    if data.is_empty:
+        return []
+    total = data.summary.total_events
+    # most events first; equal counts keep the authoritative EVENT_TYPES order
+    counts = sorted(
+        ((event_type, count) for event_type, count in data.by_type.items() if count),
+        key=lambda item: -item[1],
+    )
+    rows: List[List[Any]] = [["Event type", "Events", "Share"]]
+    rows += [[event_type, count, f"{count / total:.1%}"] for event_type, count in counts]
+    quiet = sum(1 for count in data.by_type.values() if not count)
+    flowables: List[Flowable] = [
+        _heading("Events by type"),
+        _type_chart(counts),
+        Spacer(1, 3 * mm),
+        _table(rows, [0.5, 0.25, 0.25]),
+    ]
+    if quiet:
+        flowables.append(Spacer(1, 1.5 * mm))
+        flowables.append(
+            Paragraph(_text(f"{quiet} other event types had no events in this period."), STYLES["note"])
+        )
+    return flowables
+
+
 def build_story(data: ReportData) -> List[Flowable]:
     """Every section of the report, in order, as reportlab flowables."""
     story: List[Flowable] = []
-    for section in (_title_section, _summary_section):
+    for section in (_title_section, _summary_section, _types_section):
         story.extend(section(data))
     return story
 
