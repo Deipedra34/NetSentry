@@ -18,7 +18,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional, Tuple
 
-from src.database import BlockedIP, Database, ThreatIntelResult
+from src.database import BlockedIP, Database, Event, ThreatIntelResult
+from src.notifications import CRITICAL_EVENT_TYPES
 from src.web import EVENT_TYPES
 
 logger = logging.getLogger("netsentry.reports")
@@ -319,3 +320,14 @@ def blocks(database: Database, period: ReportPeriod) -> BlockSummary:
         return BlockSummary([], [])
     during = [b for b in current if period.start <= b.blocked_at < period.end]
     return BlockSummary(current, during)
+
+
+def notable_events(database: Database, period: ReportPeriod, limit: int) -> List[Event]:
+    """The period's most notable events: critical ones (CRITICAL_EVENT_TYPES
+    in src/notifications.py, the same set that drives notifications) first,
+    newest first within each group, capped at `limit`."""
+    if limit <= 0:
+        return []
+    return database.get_notable_events(
+        _utc(period.start), _utc(period.end), sorted(CRITICAL_EVENT_TYPES), limit
+    )

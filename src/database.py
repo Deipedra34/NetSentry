@@ -291,6 +291,32 @@ class Database:
             types.setdefault(row["source_ip"], {})[row["event_type"]] = row["c"]
         return [(row["source_ip"], row["c"], types.get(row["source_ip"], {})) for row in top]
 
+    def get_notable_events(
+        self, since: datetime, until: datetime, priority_types: List[str], limit: int
+    ) -> List[Event]:
+        """Up to `limit` events in [since, until): those whose type is in
+        priority_types first, then the rest, newest first within each. For
+        reports."""
+        placeholders = ", ".join("?" for _ in priority_types) or "NULL"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, timestamp, source_ip, event_type, details FROM events "
+                "WHERE timestamp >= ? AND timestamp < ? "
+                f"ORDER BY CASE WHEN event_type IN ({placeholders}) THEN 0 ELSE 1 END, "
+                "timestamp DESC, id DESC LIMIT ?",
+                (since.isoformat(), until.isoformat(), *priority_types, limit),
+            ).fetchall()
+        return [
+            Event(
+                id=row["id"],
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                source_ip=row["source_ip"],
+                event_type=row["event_type"],
+                details=row["details"],
+            )
+            for row in rows
+        ]
+
     def get_event_details_containing(self, since: datetime, until: datetime, text: str) -> List[str]:
         """The details of every event in [since, until) whose details
         contain `text` (e.g. an enrichment tag like "[GeoIP"). For reports."""
