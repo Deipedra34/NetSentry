@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional, Tuple
 
-from src.database import Database, ThreatIntelResult
+from src.database import BlockedIP, Database, ThreatIntelResult
 from src.web import EVENT_TYPES
 
 logger = logging.getLogger("netsentry.reports")
@@ -291,3 +291,31 @@ def flagged_ips(database: Database, period: ReportPeriod) -> List[FlaggedIP]:
         logger.warning("Could not read the threat intel cache; leaving it out of the report", exc_info=True)
         return []
     return [FlaggedIP(intel, events) for intel, events in rows]
+
+
+@dataclass
+class BlockSummary:
+    """The blocked IPs section."""
+
+    # every block in place when the report is generated
+    current: List[BlockedIP]
+    # the blocks among those that were applied during the period
+    during_period: List[BlockedIP]
+
+    def __bool__(self) -> bool:
+        return bool(self.current)
+
+
+def blocks(database: Database, period: ReportPeriod) -> BlockSummary:
+    """Auto-block's currently active blocks, and which of them were applied
+    during the period. blocked_ips only holds *active* blocks (a row is
+    deleted once its block is lifted), so a block applied and lifted again
+    within the period doesn't show up. Empty when auto-block is off or
+    nothing is blocked -- the report then leaves the section out."""
+    try:
+        current = database.get_blocked_ips()
+    except sqlite3.Error:
+        logger.warning("Could not read blocked IPs; leaving them out of the report", exc_info=True)
+        return BlockSummary([], [])
+    during = [b for b in current if period.start <= b.blocked_at < period.end]
+    return BlockSummary(current, during)
