@@ -33,6 +33,7 @@ from src.geoip import GeoIPLookup
 from src.notifications import NotificationDispatcher
 from src.packet_info import PacketInfo
 from src.pcap_export import PcapExporter
+from src.reports.scheduler import ReportScheduler
 from src.threat_intel import ThreatIntelLookup
 
 logger = logging.getLogger("netsentry.engine")
@@ -233,6 +234,7 @@ class DetectionEngine:
         auto_blocker: AutoBlocker | None = None,
         threat_intel: ThreatIntelLookup | None = None,
         geoip: GeoIPLookup | None = None,
+        report_scheduler: ReportScheduler | None = None,
     ) -> None:
         # detectors should already be built/configured by build_detectors() before
         # they get here, this class doesn't do any of that itself
@@ -244,6 +246,7 @@ class DetectionEngine:
         self.auto_blocker = auto_blocker
         self.threat_intel = threat_intel
         self.geoip = geoip
+        self.report_scheduler = report_scheduler
         self._packet_count = 0
         self._event_count = 0
 
@@ -282,6 +285,12 @@ class DetectionEngine:
                 self.auto_blocker.maybe_check_expired()
             except Exception:  # noqa: BLE001 - expiry-check failures must not affect capture
                 logger.exception("AutoBlocker raised an exception checking for expired blocks")
+        if self.report_scheduler is not None:
+            # same once-a-minute piggyback as the expiry check above
+            try:
+                self.report_scheduler.maybe_run()
+            except Exception:  # noqa: BLE001 - report failures must not affect capture
+                logger.warning("ReportScheduler raised an exception", exc_info=True)
         if self._is_whitelisted(packet.src_ip):
             logger.debug("Skipping detection for whitelisted source IP %s", packet.src_ip)
             return

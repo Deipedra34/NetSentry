@@ -44,6 +44,7 @@ from src.geoip import GeoIPLookup
 from src.logging_config import setup_logging
 from src.notifications import NotificationDispatcher
 from src.pcap_export import PcapExporter
+from src.reports.scheduler import ReportScheduler
 from src.sniffer import NetworkSniffer, list_interfaces
 from src.threat_intel import ThreatIntelLookup
 
@@ -329,6 +330,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     auto_blocker = AutoBlocker(config, database, whitelist=config.whitelist)
     threat_intel = ThreatIntelLookup(config, database, whitelist=config.whitelist)
     geoip = GeoIPLookup(config, database)
+    report_scheduler = ReportScheduler(config, database)
+    if report_scheduler.enabled:
+        logger.info(
+            "Scheduled reports: %s, written to %s",
+            report_scheduler.describe(),
+            config.reports.output_dir,
+        )
     engine = DetectionEngine(
         database,
         detectors,
@@ -338,6 +346,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         auto_blocker=auto_blocker,
         threat_intel=threat_intel,
         geoip=geoip,
+        report_scheduler=report_scheduler,
     )
 
     if args.web:
