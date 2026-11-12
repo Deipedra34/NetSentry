@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from src.database import Database
 from src.web import EVENT_TYPES
@@ -134,13 +134,9 @@ def custom_period(start: datetime, end: datetime) -> ReportPeriod:
     return ReportPeriod("custom", start, end)
 
 
-def to_utc_iso(moment: datetime) -> str:
-    """moment as the UTC isoformat string events are stored with, so plain
-    string comparison against the timestamp column works."""
-    return moment.astimezone(timezone.utc).isoformat()
-
-
 def _utc(moment: datetime) -> datetime:
+    """moment in UTC -- events are stored as UTC isoformat strings, and the
+    database compares them as plain strings, so bounds must be UTC too."""
     return moment.astimezone(timezone.utc)
 
 
@@ -154,3 +150,28 @@ def events_by_type(database: Database, period: ReportPeriod) -> Dict[str, int]:
     by_type = {event_type: counts.pop(event_type, 0) for event_type in EVENT_TYPES}
     by_type.update(sorted(counts.items()))
     return by_type
+
+
+@dataclass
+class SourceSummary:
+    """One row of the top source IPs table."""
+
+    ip: str
+    events: int
+    # the event type this IP raised most often, and how many times
+    top_type: str
+    top_type_events: int
+
+
+def top_sources(database: Database, period: ReportPeriod, limit: int) -> List[SourceSummary]:
+    """The `limit` source IPs with the most events in the period, busiest
+    first, each with its most common event type (ties go to the type
+    listed first in EVENT_TYPES)."""
+    if limit <= 0:
+        return []
+    order = {event_type: index for index, event_type in enumerate(EVENT_TYPES)}
+    summaries: List[SourceSummary] = []
+    for ip, count, types in database.top_source_ips(_utc(period.start), _utc(period.end), limit):
+        top_type = min(types, key=lambda t: (-types[t], order.get(t, len(order)), t))
+        summaries.append(SourceSummary(ip, count, top_type, types[top_type]))
+    return summaries

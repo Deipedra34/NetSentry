@@ -263,6 +263,34 @@ class Database:
             rows = self._conn.execute(query, params).fetchall()
         return {row["event_type"]: row["c"] for row in rows}
 
+    def top_source_ips(
+        self, since: datetime, until: datetime, limit: int
+    ) -> List[Tuple[str, int, Dict[str, int]]]:
+        """The `limit` source IPs with the most events in [since, until), as
+        (source_ip, event count, {event_type: count}), busiest first (ties
+        broken by IP so the order is stable). For reports."""
+        window = (since.isoformat(), until.isoformat())
+        with self._lock:
+            top = self._conn.execute(
+                "SELECT source_ip, COUNT(*) AS c FROM events "
+                "WHERE timestamp >= ? AND timestamp < ? "
+                "GROUP BY source_ip ORDER BY c DESC, source_ip LIMIT ?",
+                (*window, limit),
+            ).fetchall()
+            if not top:
+                return []
+            placeholders = ", ".join("?" for _ in top)
+            breakdown = self._conn.execute(
+                "SELECT source_ip, event_type, COUNT(*) AS c FROM events "
+                "WHERE timestamp >= ? AND timestamp < ? "
+                f"AND source_ip IN ({placeholders}) GROUP BY source_ip, event_type",
+                (*window, *(row["source_ip"] for row in top)),
+            ).fetchall()
+        types: Dict[str, Dict[str, int]] = {}
+        for row in breakdown:
+            types.setdefault(row["source_ip"], {})[row["event_type"]] = row["c"]
+        return [(row["source_ip"], row["c"], types.get(row["source_ip"], {})) for row in top]
+
     def get_event_times_since(self, since: datetime) -> List[Tuple[datetime, str]]:
         """(timestamp, event_type) for every event at or after since, oldest
         first -- just the two columns the dashboard's timeline chart needs."""
