@@ -16,6 +16,7 @@ so long details can never push a table off the page.
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from typing import IO, Any, Dict, List, Optional, Tuple, Union
 from xml.sax.saxutils import escape
 
@@ -323,6 +324,108 @@ def _sources_section(data: ReportData) -> List[Flowable]:
     return flowables
 
 
+# rows the country table lists before summing up the rest
+MAX_COUNTRY_ROWS = 15
+
+
+def _local_time(data: ReportData, moment: datetime) -> str:
+    """moment in the report's timezone, 'YYYY-MM-DD HH:MM'."""
+    return moment.astimezone(data.period.start.tzinfo).strftime("%Y-%m-%d %H:%M")
+
+
+def _countries_section(data: ReportData) -> List[Flowable]:
+    if not data.countries:
+        return []
+    located = sum(count for _, count in data.countries)
+    rows: List[List[Any]] = [["Country", "Events", "Share of located events"]]
+    for country, count in data.countries[:MAX_COUNTRY_ROWS]:
+        rows.append([country, count, f"{count / located:.1%}"])
+    rest = data.countries[MAX_COUNTRY_ROWS:]
+    if rest:
+        rest_count = sum(count for _, count in rest)
+        rows.append([f"{len(rest)} other countries", rest_count, f"{rest_count / located:.1%}"])
+    return [
+        _heading("Events by country"),
+        _table(rows, [0.5, 0.2, 0.3]),
+        Spacer(1, 1.5 * mm),
+        Paragraph(
+            _text(
+                f"From GeoIP enrichment: {located} of {data.summary.total_events} events had a "
+                "location. Each counts for its source's country, or its destination's when the "
+                "source is an internal host (beaconing, data exfiltration)."
+            ),
+            STYLES["note"],
+        ),
+    ]
+
+
+def _threat_intel_section(data: ReportData) -> List[Flowable]:
+    if not data.flagged_ips:
+        return []
+    rows: List[List[Any]] = [["IP", "Events", "AbuseIPDB", "VirusTotal", "Checked"]]
+    for flagged in data.flagged_ips:
+        intel = flagged.intel
+        abuse = (
+            f"{intel.abuseipdb_score}% confidence, {intel.abuseipdb_reports or 0} reports"
+            if intel.abuseipdb_score is not None
+            else "-"
+        )
+        virustotal = (
+            f"{intel.virustotal_malicious_count}/{intel.virustotal_total_engines or 0} malicious"
+            if intel.virustotal_malicious_count is not None
+            else "-"
+        )
+        rows.append([
+            intel.source_ip,
+            flagged.events or "-",
+            abuse,
+            virustotal,
+            _local_time(data, intel.checked_at),
+        ])
+    return [
+        _heading("Threat intelligence"),
+        _table(rows, [0.26, 0.1, 0.26, 0.18, 0.2]),
+        Spacer(1, 1.5 * mm),
+        Paragraph(
+            _text(
+                "IPs active in this period with notable AbuseIPDB or VirusTotal results "
+                "(AbuseIPDB confidence of 25% or more, or at least one VirusTotal engine "
+                "flagging them malicious), from NetSentry's lookup cache. An IP with no events "
+                "is a destination that was looked up, e.g. for beaconing or data exfiltration."
+            ),
+            STYLES["note"],
+        ),
+    ]
+
+
+def _blocks_section(data: ReportData) -> List[Flowable]:
+    if not data.blocks:
+        return []
+    during = {block.id for block in data.blocks.during_period}
+    rows: List[List[Any]] = [["IP", "Triggered by", "Blocked at", "Expires", "In this period"]]
+    for block in data.blocks.current:
+        rows.append([
+            block.source_ip,
+            block.event_type,
+            _local_time(data, block.blocked_at),
+            _local_time(data, block.expires_at) if block.expires_at else "never",
+            "yes" if block.id in during else "no",
+        ])
+    return [
+        _heading("Blocked IPs"),
+        _table(rows, [0.26, 0.2, 0.2, 0.2, 0.14]),
+        Spacer(1, 1.5 * mm),
+        Paragraph(
+            _text(
+                f"{len(data.blocks.current)} IPs blocked by auto-block when this report was "
+                f"generated, {len(data.blocks.during_period)} of them blocked during this period. "
+                "Blocks that were lifted again before then aren't listed."
+            ),
+            STYLES["note"],
+        ),
+    ]
+
+
 def build_story(data: ReportData) -> List[Flowable]:
     """Every section of the report, in order, as reportlab flowables."""
     story: List[Flowable] = []
@@ -333,6 +436,9 @@ def build_story(data: ReportData) -> List[Flowable]:
         _types_section,
         _timeline_section,
         _sources_section,
+        _countries_section,
+        _threat_intel_section,
+        _blocks_section,
     ):
         flowables = section(data)
         if flowables:
