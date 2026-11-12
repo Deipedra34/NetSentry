@@ -392,6 +392,24 @@ notifications:
 #   database_path: "data/GeoLite2-City.mmdb" # or dbip-city-lite-YYYY-MM.mmdb, or a Country database
 #   asn_database_path: "data/GeoLite2-ASN.mmdb" # optional -- leave empty to skip network owner lookups
 
+# PDF summary reports of detected events: totals, events by type, a
+# timeline, top source IPs, countries, threat intel, blocked IPs and the
+# most notable events. On-demand reports (python main.py --report ..., or
+# the dashboard's "Download report" button) always work; `enabled` only
+# turns on the *scheduled* daily/weekly reports, written to output_dir
+# while capture is running. Times are local time. See README.md "Reports".
+reports:
+  enabled: false # scheduled reports are opt-in
+  output_dir: "reports/"
+  daily: true # report on the previous day...
+  daily_time: "08:00" # ...generated at this time each day
+  weekly: true # report on the previous 7 days...
+  weekly_day: "monday" # ...generated on this day of the week...
+  weekly_time: "08:00" # ...at this time
+  max_notable_events: 20 # rows in the notable events table
+  top_n_sources: 10 # rows in the top source IPs table
+  keep_reports: 30 # delete the oldest scheduled reports beyond this many (0 = keep all)
+
 database:
   path: netsentry.db
 
