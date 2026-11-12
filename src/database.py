@@ -291,6 +291,18 @@ class Database:
             types.setdefault(row["source_ip"], {})[row["event_type"]] = row["c"]
         return [(row["source_ip"], row["c"], types.get(row["source_ip"], {})) for row in top]
 
+    def get_event_details_containing(self, since: datetime, until: datetime, text: str) -> List[str]:
+        """The details of every event in [since, until) whose details
+        contain `text` (e.g. an enrichment tag like "[GeoIP"). For reports."""
+        pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT details FROM events WHERE timestamp >= ? AND timestamp < ? "
+                "AND details LIKE ? ESCAPE '\\'",
+                (since.isoformat(), until.isoformat(), pattern),
+            ).fetchall()
+        return [row["details"] for row in rows]
+
     def get_event_times_since(
         self, since: datetime, until: Optional[datetime] = None
     ) -> List[Tuple[datetime, str]]:

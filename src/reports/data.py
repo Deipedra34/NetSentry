@@ -11,9 +11,11 @@ user's yesterday, not UTC's.
 from __future__ import annotations
 
 import logging
+import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from src.database import Database
 from src.web import EVENT_TYPES
@@ -216,3 +218,38 @@ def timeline(database: Database, period: ReportPeriod) -> Timeline:
             counts[index] += 1
     starts = [period.start + timedelta(seconds=i * bucket) for i in range(count)]
     return Timeline(bucket, starts, counts)
+
+
+# the tags src/geoip.py appends to event details: "[GeoIP: <description>]"
+# for the source, "[GeoIP destination <ip>: <description>]" for the
+# destination, where the description contains "<Country> (<ISO code>)"
+_GEOIP_TAG = re.compile(r"\[GeoIP(?P<destination> destination [^:\]]+)?: (?P<description>[^\]]*)\]")
+_COUNTRY = re.compile(r"(?:^|, )(?P<name>[^,]+?) \((?P<code>[A-Z]{2})\)")
+
+
+def _country_of(description: str) -> Optional[str]:
+    match = _COUNTRY.search(description)
+    return f"{match.group('name')} ({match.group('code')})" if match else None
+
+
+def countries(database: Database, period: ReportPeriod) -> List[Tuple[str, int]]:
+    """(country, event count) for events in the period that carry GeoIP
+    data, most events first. Each event counts once: for its source's
+    country, or its destination's when the source has none (the usual
+    case for beaconing and exfiltration, where the source is internal).
+    Empty when GeoIP enrichment is off or found nothing -- the report then
+    leaves the section out."""
+    counts: Counter = Counter()
+    for details in database.get_event_details_containing(_utc(period.start), _utc(period.end), "[GeoIP"):
+        source: Optional[str] = None
+        destination: Optional[str] = None
+        for tag in _GEOIP_TAG.finditer(details):
+            country = _country_of(tag.group("description"))
+            if tag.group("destination"):
+                destination = destination or country
+            else:
+                source = source or country
+        country = source or destination
+        if country:
+            counts[country] += 1
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
