@@ -107,3 +107,43 @@ def test_empty_env_vars_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NETSENTRY_WEB_HOST", "")
     config = load_config(None)
     assert config.web.host == "127.0.0.1"
+
+
+def test_reports_defaults() -> None:
+    reports = load_config(None).reports
+    assert reports.enabled is False
+    assert reports.output_dir == "reports/"
+    assert (reports.daily, reports.daily_time) == (True, "08:00")
+    assert (reports.weekly, reports.weekly_day, reports.weekly_time) == (True, "monday", "08:00")
+    assert reports.max_notable_events == 20
+    assert reports.top_n_sources == 10
+    assert reports.keep_reports == 30
+
+
+def test_reports_overrides_from_yaml(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+reports:
+  enabled: true
+  output_dir: /srv/netsentry/reports
+  daily: false
+  weekly_day: friday
+  weekly_time: "17:30"
+  keep_reports: 5
+""",
+        encoding="utf-8",
+    )
+    reports = load_config(config_file).reports
+    assert reports.enabled is True
+    assert reports.output_dir == "/srv/netsentry/reports"
+    assert reports.daily is False
+    assert reports.daily_time == "08:00"  # untouched keys keep their defaults
+    assert (reports.weekly_day, reports.weekly_time) == ("friday", "17:30")
+    assert reports.keep_reports == 5
+    assert reports.max_notable_events == 20
+
+
+def test_shipped_config_reports_section_matches_defaults() -> None:
+    shipped = load_config(Path(__file__).resolve().parent.parent / "config.yaml").reports
+    assert shipped == load_config(None).reports
