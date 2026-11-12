@@ -18,6 +18,11 @@ Some examples (from the project root):
     Just want to browse events already in the db, no live capture:
         python main.py --web-only
 
+    PDF report of yesterday's events, or of a custom range (no capture,
+    just reads the database):
+        python main.py --report daily
+        python main.py --report custom --from 2026-11-01 --to 2026-11-07
+
 Note you'll need root/admin rights for real packet capture (scapy needs it).
 """
 
@@ -27,6 +32,7 @@ import argparse
 import logging
 import sys
 import threading
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -113,7 +119,84 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Print the NetSentry version and exit.",
     )
+    report_group = parser.add_argument_group(
+        "reports", "Write a PDF summary report from the database and exit (no packet capture)."
+    )
+    report_group.add_argument(
+        "--report",
+        choices=("daily", "weekly", "custom"),
+        help=(
+            "daily: yesterday; weekly: the last 7 whole days; custom: --from/--to. "
+            "Written to reports.output_dir unless --report-output is given."
+        ),
+    )
+    report_group.add_argument(
+        "--from",
+        dest="report_from",
+        metavar="ISO_DATE",
+        help="Start of a custom report, e.g. 2026-11-01 or 2026-11-01T08:00 (local time).",
+    )
+    report_group.add_argument(
+        "--to",
+        dest="report_to",
+        metavar="ISO_DATE",
+        help=(
+            "End of a custom report (default: now). A date alone includes that whole day, "
+            "so --from 2026-11-01 --to 2026-11-07 covers seven days."
+        ),
+    )
+    report_group.add_argument(
+        "--report-output",
+        metavar="PATH",
+        help="Write the report to this file instead of reports.output_dir.",
+    )
     return parser.parse_args(argv)
+
+
+def _parse_report_time(value: str, end: bool) -> datetime:
+    """An ISO date or datetime from --from/--to, as local time. A bare
+    date means the start of that day -- or, for --to, the end of it."""
+    moment = datetime.fromisoformat(value)
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return moment  # had a time part
+    return moment + timedelta(days=1) if end else moment
+
+
+def run_report(args: argparse.Namespace, config: Config, database: Database) -> int:
+    """Handles --report: writes the PDF, prints its path, returns the exit
+    code. Never starts packet capture."""
+    from src.reports import custom_period, daily_period, weekly_period, write_report
+
+    if args.report != "custom" and (args.report_from or args.report_to):
+        print("Error: --from/--to only apply to --report custom.", file=sys.stderr)
+        return 1
+    today = date.today()
+    try:
+        if args.report == "daily":
+            period = daily_period(today - timedelta(days=1))
+        elif args.report == "weekly":
+            period = weekly_period(today - timedelta(days=7))
+        else:
+            if not args.report_from:
+                print("Error: --report custom needs --from (and optionally --to).", file=sys.stderr)
+                return 1
+            start = _parse_report_time(args.report_from, end=False)
+            end = _parse_report_time(args.report_to, end=True) if args.report_to else datetime.now()
+            period = custom_period(start, end)
+    except ValueError as exc:
+        print(f"Error: invalid report range: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        path = write_report(database, period, args.report_output, settings=config.reports)
+    except Exception as exc:  # noqa: BLE001 - report the failure, don't dump a traceback
+        logger.exception("Failed to generate report")
+        print(f"Error: could not generate the report: {exc}", file=sys.stderr)
+        return 1
+    print(f"Report written to {path}")
+    return 0
 
 
 def run_web_dashboard(database: Database, config: Config, blocking: bool) -> Optional[threading.Thread]:
@@ -216,6 +299,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     # setup_logging / PcapExporter)
     Path(config.database.path).parent.mkdir(parents=True, exist_ok=True)
     database = Database(config.database.path)
+
+    if args.report:
+        try:
+            return run_report(args, config, database)
+        finally:
+            database.close()
 
     if args.web_only:
         run_web_dashboard(database, config, blocking=True)
