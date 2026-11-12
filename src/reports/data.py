@@ -175,3 +175,44 @@ def top_sources(database: Database, period: ReportPeriod, limit: int) -> List[So
         top_type = min(types, key=lambda t: (-types[t], order.get(t, len(order)), t))
         summaries.append(SourceSummary(ip, count, top_type, types[top_type]))
     return summaries
+
+
+@dataclass
+class Timeline:
+    """Event volume over the period: bucket start times (in the period's
+    timezone) and the number of events in each."""
+
+    bucket_seconds: int
+    starts: List[datetime]
+    counts: List[int]
+
+
+def _bucket_seconds(length: timedelta) -> int:
+    """A bucket size that gives a readable number of bars: 5-minute buckets
+    for an hour, hourly for a day, 6-hourly for a week, daily for a month,
+    weekly beyond that."""
+    seconds = length.total_seconds()
+    if seconds <= 2 * 3600:
+        return 300
+    if seconds <= 2 * 86400:
+        return 3600
+    if seconds <= 14 * 86400:
+        return 6 * 3600
+    if seconds <= 92 * 86400:
+        return 86400
+    return 7 * 86400
+
+
+def timeline(database: Database, period: ReportPeriod) -> Timeline:
+    """Events per time bucket across the whole period, zero-filled; buckets
+    start at period.start, the last one may be cut short by period.end."""
+    bucket = _bucket_seconds(period.duration)
+    count = max(1, -(-int(period.duration.total_seconds()) // bucket))
+    counts = [0] * count
+    first = period.start.timestamp()
+    for moment, _ in database.get_event_times_since(_utc(period.start), _utc(period.end)):
+        index = int((moment.timestamp() - first) // bucket)
+        if 0 <= index < count:
+            counts[index] += 1
+    starts = [period.start + timedelta(seconds=i * bucket) for i in range(count)]
+    return Timeline(bucket, starts, counts)

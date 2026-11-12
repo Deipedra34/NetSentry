@@ -291,15 +291,19 @@ class Database:
             types.setdefault(row["source_ip"], {})[row["event_type"]] = row["c"]
         return [(row["source_ip"], row["c"], types.get(row["source_ip"], {})) for row in top]
 
-    def get_event_times_since(self, since: datetime) -> List[Tuple[datetime, str]]:
-        """(timestamp, event_type) for every event at or after since, oldest
-        first -- just the two columns the dashboard's timeline chart needs."""
+    def get_event_times_since(
+        self, since: datetime, until: Optional[datetime] = None
+    ) -> List[Tuple[datetime, str]]:
+        """(timestamp, event_type) for every event at or after since (and
+        before until, if given), oldest first -- just the two columns the
+        dashboard's and reports' timeline charts need."""
+        query = "SELECT timestamp, event_type FROM events WHERE timestamp >= ?"
+        params: List[Any] = [since.isoformat()]
+        if until is not None:
+            query += " AND timestamp < ?"
+            params.append(until.isoformat())
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT timestamp, event_type FROM events WHERE timestamp >= ? "
-                "ORDER BY timestamp",
-                (since.isoformat(),),
-            ).fetchall()
+            rows = self._conn.execute(query + " ORDER BY timestamp", params).fetchall()
         return [(datetime.fromisoformat(row["timestamp"]), row["event_type"]) for row in rows]
 
     def add_blocked_ip(self, blocked: BlockedIP) -> BlockedIP:
