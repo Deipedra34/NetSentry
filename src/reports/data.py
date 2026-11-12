@@ -331,3 +331,82 @@ def notable_events(database: Database, period: ReportPeriod, limit: int) -> List
     return database.get_notable_events(
         _utc(period.start), _utc(period.end), sorted(CRITICAL_EVENT_TYPES), limit
     )
+
+
+@dataclass
+class Summary:
+    """The summary section's figures, for the period and the previous
+    period of the same length."""
+
+    total_events: int
+    critical_events: int
+    distinct_sources: int
+    previous_total_events: int
+    previous_critical_events: int
+    previous_distinct_sources: int
+
+
+def _critical(by_type: Dict[str, int]) -> int:
+    return sum(count for event_type, count in by_type.items() if event_type in CRITICAL_EVENT_TYPES)
+
+
+def summary(database: Database, period: ReportPeriod, by_type: Optional[Dict[str, int]] = None) -> Summary:
+    """Totals for the period and the one before it. by_type, if the caller
+    already has the period's events_by_type(), saves querying it again."""
+    current = by_type if by_type is not None else events_by_type(database, period)
+    previous_period = period.previous()
+    previous = events_by_type(database, previous_period)
+    return Summary(
+        total_events=sum(current.values()),
+        critical_events=_critical(current),
+        distinct_sources=database.count_distinct_sources(_utc(period.start), _utc(period.end)),
+        previous_total_events=sum(previous.values()),
+        previous_critical_events=_critical(previous),
+        previous_distinct_sources=database.count_distinct_sources(
+            _utc(previous_period.start), _utc(previous_period.end)
+        ),
+    )
+
+
+@dataclass
+class ReportData:
+    """Everything one report shows -- what src/reports/pdf.py lays out."""
+
+    period: ReportPeriod
+    generated_at: datetime
+    summary: Summary
+    by_type: Dict[str, int]
+    timeline: Timeline
+    top_sources: List[SourceSummary]
+    countries: List[Tuple[str, int]]
+    flagged_ips: List[FlaggedIP]
+    blocks: BlockSummary
+    notable_events: List[Event]
+
+    @property
+    def is_empty(self) -> bool:
+        """True if no events were detected in the period."""
+        return self.summary.total_events == 0
+
+
+def collect_report_data(
+    database: Database,
+    period: ReportPeriod,
+    max_notable_events: int = 20,
+    top_n_sources: int = 10,
+    generated_at: Optional[datetime] = None,
+) -> ReportData:
+    """Runs every report query for the period."""
+    by_type = events_by_type(database, period)
+    return ReportData(
+        period=period,
+        generated_at=generated_at or datetime.now(period.end.tzinfo),
+        summary=summary(database, period, by_type),
+        by_type=by_type,
+        timeline=timeline(database, period),
+        top_sources=top_sources(database, period, top_n_sources),
+        countries=countries(database, period),
+        flagged_ips=flagged_ips(database, period),
+        blocks=blocks(database, period),
+        notable_events=notable_events(database, period, max_notable_events),
+    )

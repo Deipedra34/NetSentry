@@ -263,6 +263,16 @@ class Database:
             rows = self._conn.execute(query, params).fetchall()
         return {row["event_type"]: row["c"] for row in rows}
 
+    def count_distinct_sources(self, since: datetime, until: datetime) -> int:
+        """How many different source IPs raised events in [since, until)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(DISTINCT source_ip) AS c FROM events "
+                "WHERE timestamp >= ? AND timestamp < ?",
+                (since.isoformat(), until.isoformat()),
+            ).fetchone()
+        return int(row["c"])
+
     def top_source_ips(
         self, since: datetime, until: datetime, limit: int
     ) -> List[Tuple[str, int, Dict[str, int]]]:
