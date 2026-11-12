@@ -297,11 +297,43 @@ def _timeline_section(data: ReportData) -> List[Flowable]:
     ]
 
 
+def _sources_section(data: ReportData) -> List[Flowable]:
+    if not data.top_sources:
+        return []
+    total = data.summary.total_events
+    rows: List[List[Any]] = [["#", "Source IP", "Events", "Share", "Most common event type"]]
+    for rank, source in enumerate(data.top_sources, start=1):
+        rows.append([
+            rank,
+            source.ip,
+            source.events,
+            f"{source.events / total:.1%}" if total else "-",
+            f"{source.top_type} ({source.top_type_events})",
+        ])
+    flowables: List[Flowable] = [
+        _heading("Top source IPs"),
+        _table(rows, [0.06, 0.34, 0.12, 0.12, 0.36]),
+    ]
+    shown, distinct = len(data.top_sources), data.summary.distinct_sources
+    if distinct > shown:
+        flowables.append(Spacer(1, 1.5 * mm))
+        flowables.append(
+            Paragraph(_text(f"Showing the top {shown} of {distinct} source IPs."), STYLES["note"])
+        )
+    return flowables
+
+
 def build_story(data: ReportData) -> List[Flowable]:
     """Every section of the report, in order, as reportlab flowables."""
     story: List[Flowable] = []
     # (a section's heading always stays on the same page as what follows it)
-    for section in (_title_section, _summary_section, _types_section, _timeline_section):
+    for section in (
+        _title_section,
+        _summary_section,
+        _types_section,
+        _timeline_section,
+        _sources_section,
+    ):
         flowables = section(data)
         if flowables:
             story.append(KeepTogether(flowables[:2]))
