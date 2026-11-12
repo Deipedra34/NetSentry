@@ -426,6 +426,34 @@ def _blocks_section(data: ReportData) -> List[Flowable]:
     ]
 
 
+# characters of an event's details shown before it's cut off
+MAX_DETAILS_LENGTH = 300
+
+
+def _notable_section(data: ReportData) -> List[Flowable]:
+    if not data.notable_events:
+        return []
+    rows: List[List[Any]] = [["Time", "Event type", "Source IP", "Details"]]
+    for event in data.notable_events:
+        rows.append([
+            _local_time(data, event.timestamp),
+            event.event_type,
+            event.source_ip,
+            _cell(event.details, limit=MAX_DETAILS_LENGTH),
+        ])
+    shown = len(data.notable_events)
+    note = (
+        "Critical events first (the types NetSentry sends notifications for), newest first; "
+        f"showing {shown} of {data.summary.total_events} events."
+    )
+    return [
+        _heading("Notable events"),
+        _table(rows, [0.13, 0.22, 0.18, 0.47]),
+        Spacer(1, 1.5 * mm),
+        Paragraph(_text(note), STYLES["note"]),
+    ]
+
+
 def build_story(data: ReportData) -> List[Flowable]:
     """Every section of the report, in order, as reportlab flowables."""
     story: List[Flowable] = []
@@ -439,6 +467,7 @@ def build_story(data: ReportData) -> List[Flowable]:
         _countries_section,
         _threat_intel_section,
         _blocks_section,
+        _notable_section,
     ):
         flowables = section(data)
         if flowables:
