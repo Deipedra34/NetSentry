@@ -15,11 +15,12 @@ if [ "$(id -u)" != "0" ]; then
     exec "$@"
 fi
 
-# data/, logs/ and captures/ are bind mounts, and Docker creates any that
-# don't exist on the host yet as root:root -- hand them to the netsentry
-# user so the database, logs and pcap exports can actually be written.
-mkdir -p data logs captures
-chown netsentry:netsentry data logs captures
+# data/, logs/, captures/ and reports/ are bind mounts, and Docker creates
+# any that don't exist on the host yet as root:root -- hand them to the
+# netsentry user so the database, logs, pcap exports and PDF reports can
+# actually be written.
+mkdir -p data logs captures reports
+chown netsentry:netsentry data logs captures reports
 
 # A non-root process doesn't keep root's capabilities, so cap_add alone
 # isn't enough for capture as netsentry. Carry NET_RAW/NET_ADMIN over as

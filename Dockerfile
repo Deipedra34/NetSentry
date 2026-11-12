@@ -41,8 +41,8 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY . .
-RUN mkdir -p data logs captures certs \
-    && chown netsentry:netsentry data logs captures certs \
+RUN mkdir -p data logs captures reports certs \
+    && chown netsentry:netsentry data logs captures reports certs \
     && chmod +x docker/entrypoint.sh
 
 # Dashboard port (web.port in config.yaml)

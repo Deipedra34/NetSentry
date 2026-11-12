@@ -47,6 +47,7 @@ services:
     volumes:
       - ./data:/app/data          # database, ML model, JA3 blocklist, GeoIP databases
       - ./captures:/app/captures  # PCAP exports
+      - ./reports:/app/reports    # PDF reports (scheduled, and CLI on-demand)
       - ./logs:/app/logs          # log files
       - ./config.yaml:/app/config.yaml:ro
 

@@ -19,6 +19,7 @@ tests/
 *.log
 captures/
 logs/
+reports/
 data/*.mmdb
 data/*.joblib
 

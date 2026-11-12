@@ -54,6 +54,8 @@ netsentry.log
 *.pcapng
 *.joblib
 *.mmdb
+# generated PDF reports (anchored: src/reports/ is source code)
+/reports/
 
 # --- Environment / secrets ---
 .env
