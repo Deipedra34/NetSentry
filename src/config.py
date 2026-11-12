@@ -454,6 +454,33 @@ class GeoIPConfig:
 
 
 @dataclass
+class ReportsConfig:
+    """PDF summary reports -- see src/reports/. On-demand reports (CLI
+    --report, the dashboard's download button) always work; `enabled` only
+    turns on the scheduled daily/weekly ones, which are opt-in."""
+
+    enabled: bool = False
+    # where scheduled (and, by default, on-demand CLI) reports are written
+    output_dir: str = "reports/"
+    # report on the previous day, generated daily at daily_time (local
+    # time, "HH:MM")
+    daily: bool = True
+    daily_time: str = "08:00"
+    # report on the previous 7 days, generated every weekly_day (e.g.
+    # "monday") at weekly_time (local time, "HH:MM")
+    weekly: bool = True
+    weekly_day: str = "monday"
+    weekly_time: str = "08:00"
+    # rows in the notable events table (critical events first, newest first)
+    max_notable_events: int = 20
+    # rows in the top source IPs table
+    top_n_sources: int = 10
+    # scheduled reports kept in output_dir -- the oldest beyond this are
+    # deleted; 0 keeps them all
+    keep_reports: int = 30
+
+
+@dataclass
 class WebConfig:
     """Flask dashboard settings."""
 
@@ -504,6 +531,7 @@ class Config:
     auto_block: AutoBlockConfig = field(default_factory=AutoBlockConfig)
     threat_intel: ThreatIntelConfig = field(default_factory=ThreatIntelConfig)
     geoip: GeoIPConfig = field(default_factory=GeoIPConfig)
+    reports: ReportsConfig = field(default_factory=ReportsConfig)
 
 
 def _merge_dataclass(instance: Any, overrides: Dict[str, Any]) -> Any:
