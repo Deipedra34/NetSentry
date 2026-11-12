@@ -400,6 +400,34 @@ class Database:
             ).fetchall()
         return {row["source_ip"]: _row_to_threat_intel(row) for row in rows}
 
+    def get_flagged_threat_intel(
+        self,
+        since: datetime,
+        until: datetime,
+        min_abuseipdb_score: int,
+        min_virustotal_malicious: int,
+        limit: int,
+    ) -> List[Tuple[ThreatIntelResult, int]]:
+        """Cached lookups at or above either threshold for IPs that were
+        active in [since, until) -- raised an event then, or were looked up
+        then (destination IPs never appear as an event's source) -- with
+        each IP's event count in the window, worst first. For reports."""
+        columns = ", ".join(f"t.{column.strip()}" for column in _THREAT_INTEL_COLUMNS.split(","))
+        window = (since.isoformat(), until.isoformat())
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {columns}, COALESCE(e.c, 0) AS events FROM threat_intel_cache t "
+                "LEFT JOIN (SELECT source_ip, COUNT(*) AS c FROM events "
+                "WHERE timestamp >= ? AND timestamp < ? GROUP BY source_ip) e "
+                "ON e.source_ip = t.source_ip "
+                "WHERE (t.abuseipdb_score >= ? OR t.virustotal_malicious_count >= ?) "
+                "AND (e.c IS NOT NULL OR (t.checked_at >= ? AND t.checked_at < ?)) "
+                "ORDER BY COALESCE(t.abuseipdb_score, 0) DESC, "
+                "COALESCE(t.virustotal_malicious_count, 0) DESC, t.source_ip LIMIT ?",
+                (*window, min_abuseipdb_score, min_virustotal_malicious, *window, limit),
+            ).fetchall()
+        return [(_row_to_threat_intel(row), row["events"]) for row in rows]
+
     def save_threat_intel(self, result: ThreatIntelResult) -> None:
         """Inserts or replaces the cached lookup for result.source_ip --
         only the latest lookup per IP is kept."""

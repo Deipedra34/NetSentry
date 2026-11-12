@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import logging
 import re
+import sqlite3
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Dict, List, Optional, Tuple
 
-from src.database import Database
+from src.database import Database, ThreatIntelResult
 from src.web import EVENT_TYPES
 
 logger = logging.getLogger("netsentry.reports")
@@ -253,3 +254,40 @@ def countries(database: Database, period: ReportPeriod) -> List[Tuple[str, int]]
         if country:
             counts[country] += 1
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+
+
+# what counts as a notable threat intel result: AbuseIPDB's own docs treat
+# a confidence score of 25%+ as worth a look; one VirusTotal engine calling
+# an IP malicious already is
+ABUSEIPDB_NOTABLE_SCORE = 25
+VIRUSTOTAL_NOTABLE_MALICIOUS = 1
+MAX_FLAGGED_IPS = 25
+
+
+@dataclass
+class FlaggedIP:
+    """One row of the threat intelligence section."""
+
+    intel: ThreatIntelResult
+    # events this IP raised in the period (0 for a destination IP that was
+    # only looked up, e.g. by beaconing or exfiltration)
+    events: int
+
+
+def flagged_ips(database: Database, period: ReportPeriod) -> List[FlaggedIP]:
+    """IPs active in the period whose cached AbuseIPDB/VirusTotal results
+    are notable, worst first, capped at MAX_FLAGGED_IPS. Empty when threat
+    intel is off, found nothing notable, or the cache table can't be read
+    -- the report then leaves the section out."""
+    try:
+        rows = database.get_flagged_threat_intel(
+            _utc(period.start),
+            _utc(period.end),
+            ABUSEIPDB_NOTABLE_SCORE,
+            VIRUSTOTAL_NOTABLE_MALICIOUS,
+            MAX_FLAGGED_IPS,
+        )
+    except sqlite3.Error:
+        logger.warning("Could not read the threat intel cache; leaving it out of the report", exc_info=True)
+        return []
+    return [FlaggedIP(intel, events) for intel, events in rows]
