@@ -163,12 +163,18 @@ netsentry/
 │   │   ├── pdf.py                # reportlab layout: tables + charts
 │   │   ├── generator.py          # Collect, render and write a report
 │   │   └── scheduler.py          # Scheduled daily/weekly reports + rotation
-│   ├── web.py                    # Flask app, JSON API, self-signed TLS setup
+│   ├── auth.py                   # Dashboard accounts: hashing, sessions, CSRF, roles
+│   ├── web.py                    # Flask app, JSON API, login, self-signed TLS setup
 │   └── templates/
-│       └── dashboard.html
+│       ├── dashboard.html
+│       ├── auth_base.html         # Shared layout for the pages below
+│       ├── login.html
+│       ├── admin_users.html       # Admin-only user management
+│       └── setup_required.html    # Shown until the first admin exists
 ├── data/
 │   ├── ja3_blocklist.txt         # User-supplied JA3 threat intel (empty by default)
 │   ├── ml_model.joblib           # Trained MLAnomalyDetector model (not shipped, see below)
+│   ├── secret_key                # Session signing key (created on first start, not shipped)
 │   └── GeoLite2-City.mmdb        # GeoIP database (not shipped, see "GeoIP Enrichment")
 └── tests/
     ├── conftest.py                # Shared fixtures / mock packet builder
@@ -199,7 +205,19 @@ netsentry/
     ├── test_report_cli.py
     ├── test_report_web.py
     ├── test_report_scheduler.py
-    └── test_web_app.py
+    ├── test_web_app.py
+    ├── auth_helpers.py             # Shared helpers for the auth tests
+    ├── test_users_db.py
+    ├── test_auth_passwords.py
+    ├── test_auth_accounts.py
+    ├── test_auth_secret_key.py
+    ├── test_auth_limiter.py
+    ├── test_auth_csrf.py
+    ├── test_web_login.py
+    ├── test_web_access.py
+    ├── test_web_admin.py
+    ├── test_user_cli.py
+    └── test_startup_warnings.py
 ```
 
 ---
@@ -503,6 +521,11 @@ and restart the dashboard — no code changes needed. Auth is disabled if
 `username`/`password` are left empty. Never commit real credentials to
 version control.
 
+For individual user accounts with a login page, session timeouts and
+admin/viewer roles instead of one shared login, see
+[Dashboard Authentication](#dashboard-authentication). Once that's enabled,
+it replaces this Basic Auth.
+
 ### Only run specific detectors
 
 ```bash
@@ -545,6 +568,11 @@ python main.py --help
 --report                daily | weekly | custom: write a PDF report and exit (no capture)
 --from, --to            Start/end of a custom report (ISO date or date-time, local time)
 --report-output         Write the report to this path instead of reports.output_dir
+--create-user USERNAME  Create a dashboard account (with --role admin|viewer; password prompted)
+--set-password USERNAME Set a new password for a dashboard account (prompted)
+--list-users            List dashboard accounts
+--set-role USERNAME ROLE, --disable-user / --enable-user / --delete-user USERNAME
+                        Manage dashboard accounts (see "Dashboard Authentication")
 ```
 
 ### Dashboard preview
@@ -625,6 +653,180 @@ web:
   port: 5000
   refresh_interval: 5
 ```
+
+---
+
+## Dashboard Authentication
+
+By default the dashboard has no user accounts: it's open on `127.0.0.1`, or
+protected by the single shared `web.username`/`web.password` Basic Auth
+login if you set one (see [Dashboard access](#dashboard-access)). For a
+dashboard that other people (or other machines) can reach, turn on
+**dashboard authentication** instead: individual user accounts, a login
+page, sessions that time out, and two roles.
+
+### Enabling it
+
+1. In `config.yaml`, set `enabled: true` in the `auth` section (and keep
+   `web.https: true` if the dashboard is reachable from the network):
+
+   ```yaml
+   auth:
+     enabled: true
+   ```
+
+2. Create the first admin account from the CLI. NetSentry never ships a
+   default account or default password. Until the first account exists,
+   the dashboard refuses every request and only shows a page explaining
+   this step, and the log says the same.
+
+   ```bash
+   # native install
+   python main.py --create-user alice --role admin
+
+   # Docker (inside the running container)
+   docker compose exec netsentry python main.py --create-user alice --role admin
+   ```
+
+   You're asked for the password twice, at a hidden prompt. Passwords are
+   never accepted as command-line arguments or environment variables,
+   because those leak into shell history and process lists.
+
+3. Restart NetSentry (only needed after changing `config.yaml`) and sign in
+   at `/login`.
+
+The user commands only need the database. They never start packet capture,
+and they take effect right away, even while the dashboard is running.
+
+```
+--create-user USERNAME --role admin|viewer   Create an account (prompts for the password)
+--set-password USERNAME                      Set a new password (prompts for it)
+--list-users                                 List accounts, roles, status and last sign-in
+--set-role USERNAME ROLE                     Change an account's role
+--disable-user USERNAME                      Block an account without deleting it
+--enable-user USERNAME                       Unblock it again
+--delete-user USERNAME                       Delete an account
+```
+
+Usernames are 3 to 32 characters (letters, digits, dot, dash, underscore)
+and case-insensitive (`Alice` and `alice` are the same account). Passwords
+must be at least `auth.min_password_length` characters (12 by default) and
+must not be the same as the username. Passwords are stored only as salted
+scrypt hashes (via `werkzeug.security`) in the `users` table of the
+existing SQLite database, and are never logged.
+
+### Roles
+
+| Role | Can do |
+|---|---|
+| `admin` | Everything a viewer can, plus user management at `/admin/users`: create users, reset passwords, change roles, disable/enable and delete accounts |
+| `viewer` | Read-only: the dashboard, charts, events, blocked IPs and PDF report downloads |
+
+A viewer who opens an admin page gets `403 Forbidden`. To keep someone able
+to manage users, NetSentry refuses (in the CLI and on the dashboard) to
+delete, disable or demote the **last enabled admin**. An admin also can't
+delete or disable their own account from the dashboard.
+
+Role and account changes apply on the next request. A disabled, deleted or
+demoted user loses that access immediately, even with a live session.
+
+### Sessions and lockout
+
+```yaml
+auth:
+  enabled: false
+  session_lifetime_minutes: 480 # absolute limit, sign in again after this
+  idle_timeout_minutes: 60      # signed out after this long without a request
+  max_failed_logins: 5          # failures per username or client IP...
+  lockout_minutes: 15           # ...lock further attempts out for this long
+  min_password_length: 12
+  secret_key_path: "data/secret_key"
+  cookie_secure: "auto"         # auto | true | false
+```
+
+- **Sessions** are Flask's signed session cookies. They hold only your user
+  id, when the session started, when you were last active, and a CSRF
+  token. Your role and account status are read from the database on every
+  request. Both timeouts are checked on every request. The open dashboard
+  polls the API every few seconds, so an open dashboard tab counts as
+  activity and stays signed in until `session_lifetime_minutes`.
+- **Cookies** are always `HttpOnly` and `SameSite=Lax`. `cookie_secure:
+  auto` adds `Secure` whenever `web.https` is on. Use `"true"` if TLS is
+  terminated by a reverse proxy in front of NetSentry.
+- **Secret key**: the cookies are signed with a random 32-byte key that's
+  created at `secret_key_path` on first start (permission `600` where the
+  OS supports it) and reused afterwards, so sessions survive restarts. It's
+  in `.gitignore`/`.dockerignore` and never logged. In Docker it lives in
+  the mounted `data/` folder next to the database, so accounts and
+  sessions survive container restarts. Deleting the file and restarting
+  signs everyone out.
+- **Failed logins** all get the same "Invalid username or password"
+  message and take about as long whether or not the username exists, so
+  neither reveals which usernames are valid. After `max_failed_logins`
+  failures for one username, or from one client IP, within
+  `lockout_minutes`, further attempts are refused until `lockout_minutes`
+  have passed. The lockout always expires on its own, so nobody can lock an
+  admin out permanently. The lockout counters are kept in memory (bounded
+  in size) and reset when NetSentry restarts.
+- **CSRF**: login, sign-out and every user management action require a
+  per-session CSRF token. Sign-out is a POST, not a link.
+- **Redirects**: `/login?next=...` only returns you to a path on the
+  dashboard itself, never to another site.
+- The dashboard also sends `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY` and `Referrer-Policy: same-origin`.
+
+With auth enabled, every page and API endpoint requires a signed-in user.
+API calls without a session get `401` with a JSON error body
+(`{"error": "authentication required"}`), and pages redirect to `/login`.
+The only public routes are `/login` and `/healthz`. `/healthz` returns
+nothing but `{"status": "ok"}`, and stays public so the Docker
+`HEALTHCHECK` and other uptime monitors keep working.
+
+### TLS, the legacy Basic Auth, and the desktop app
+
+- **TLS**: use `web.https: true` whenever the dashboard is reachable from
+  other machines. Otherwise passwords and session cookies cross the
+  network unencrypted. At startup NetSentry logs a warning when auth is
+  enabled, TLS is off, and the dashboard listens beyond localhost. It also
+  warns when the dashboard listens beyond localhost (for example `0.0.0.0`
+  in Docker) while `auth.enabled` is false.
+- **Legacy Basic Auth**: with `auth.enabled: false`, `web.username` /
+  `web.password` keep working exactly as before. With `auth.enabled: true`,
+  the session login takes over and Basic Auth is no longer used (a note is
+  logged if both are configured).
+- **Desktop app**: `desktop_app.py` always runs the dashboard without any
+  login, whatever `auth` says. It only listens on the local machine and
+  loads the page into its own native window.
+
+### Forgotten admin password
+
+If the only admin has forgotten their password, set a new one from the CLI
+on the machine running NetSentry:
+
+```bash
+python main.py --set-password alice
+# Docker:
+docker compose exec netsentry python main.py --set-password alice
+```
+
+### What it does not do
+
+Dashboard authentication protects the web dashboard, not the machine it runs on:
+
+- No two-factor authentication.
+- No self-service password reset by email. An admin resets passwords on
+  the user management page, or anyone with shell access uses the CLI.
+- No protection against someone with filesystem access to the machine:
+  they can read the database and `secret_key`, create accounts with the
+  CLI, or edit `config.yaml` to turn auth off.
+- Sessions are signed cookies, not stored on the server. Signing out clears
+  the cookie in your browser, and disabling or deleting an account cuts it
+  off immediately. But a password reset doesn't end sessions that are
+  already open. To end them, disable the account, or delete `secret_key`
+  and restart to sign everyone out.
+- Behind a reverse proxy, every request comes from the proxy's IP, so the
+  per-IP lockout covers all clients together (the per-username lockout
+  still works as usual).
 
 ---
 
