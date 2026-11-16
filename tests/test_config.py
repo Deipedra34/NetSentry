@@ -147,3 +147,42 @@ reports:
 def test_shipped_config_reports_section_matches_defaults() -> None:
     shipped = load_config(Path(__file__).resolve().parent.parent / "config.yaml").reports
     assert shipped == load_config(None).reports
+
+
+def test_auth_defaults() -> None:
+    auth = load_config(None).auth
+    assert auth.enabled is False
+    assert auth.session_lifetime_minutes == 480
+    assert auth.idle_timeout_minutes == 60
+    assert (auth.max_failed_logins, auth.lockout_minutes) == (5, 15)
+    assert auth.min_password_length == 12
+    assert auth.secret_key_path == "data/secret_key"
+    assert auth.cookie_secure == "auto"
+
+
+def test_auth_overrides_from_yaml(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+auth:
+  enabled: true
+  idle_timeout_minutes: 15
+  lockout_minutes: 30
+  secret_key_path: /srv/netsentry/secret_key
+  cookie_secure: "true"
+""",
+        encoding="utf-8",
+    )
+    auth = load_config(config_file).auth
+    assert auth.enabled is True
+    assert auth.idle_timeout_minutes == 15
+    assert auth.lockout_minutes == 30
+    assert auth.secret_key_path == "/srv/netsentry/secret_key"
+    assert auth.cookie_secure == "true"
+    assert auth.session_lifetime_minutes == 480  # untouched keys keep their defaults
+    assert auth.max_failed_logins == 5
+
+
+def test_shipped_config_auth_section_matches_defaults() -> None:
+    shipped = load_config(Path(__file__).resolve().parent.parent / "config.yaml").auth
+    assert shipped == load_config(None).auth
