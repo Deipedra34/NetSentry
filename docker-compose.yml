@@ -44,8 +44,16 @@ services:
       - -c
       - 'exec python main.py --web --auto-block-dry-run $${NETSENTRY_INTERFACES:+--interface $$NETSENTRY_INTERFACES}'
 
+    # Dashboard login: the dashboard listens on 0.0.0.0 here, so turn on
+    # `auth: enabled: true` in config.yaml (ideally with web.https: true),
+    # restart, then create the first admin inside the running container --
+    # the password is prompted for, never passed as an argument:
+    #   docker compose exec netsentry python main.py --create-user alice --role admin
+    # User accounts (in the database) and the session signing key
+    # (data/secret_key) both live in ./data below, so logins survive
+    # container restarts and rebuilds. See README.md "Dashboard Authentication".
     volumes:
-      - ./data:/app/data          # database, ML model, JA3 blocklist, GeoIP databases
+      - ./data:/app/data          # database (incl. dashboard users), session key, ML model, JA3 blocklist, GeoIP databases
       - ./captures:/app/captures  # PCAP exports
       - ./reports:/app/reports    # PDF reports (scheduled, and CLI on-demand)
       - ./logs:/app/logs          # log files
