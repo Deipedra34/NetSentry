@@ -34,6 +34,7 @@ Note you'll need root/admin rights for real packet capture (scapy needs it).
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import logging
 import sys
 import threading
@@ -316,6 +317,43 @@ def run_report(args: argparse.Namespace, config: Config, database: Database) -> 
     return 0
 
 
+def _is_loopback_host(host: str) -> bool:
+    """True if binding the dashboard to host only exposes it to this
+    machine (127.0.0.1, ::1, localhost) -- not 0.0.0.0, a LAN address etc."""
+    if host.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def dashboard_security_warnings(config: Config) -> List[str]:
+    """Startup warnings about how the dashboard is exposed -- each one is
+    logged by run_web_dashboard(). Nothing to warn about while it only
+    listens on the local machine."""
+    if _is_loopback_host(config.web.host):
+        return []
+    where = f"{config.web.host}:{config.web.port}"
+    if not config.auth.enabled:
+        if config.web.username and config.web.password:
+            protection = "only the legacy shared Basic Auth login"
+        else:
+            protection = "NO authentication"
+        return [
+            f"The dashboard listens on {where} (beyond this machine) with {protection}: "
+            "anyone who can reach it can read the captured events. Set auth.enabled: true "
+            "in config.yaml and create an admin with --create-user (see README.md "
+            "'Dashboard Authentication')."
+        ]
+    if not config.web.https:
+        return [
+            f"Dashboard authentication is on but the dashboard listens on {where} over plain "
+            "HTTP: passwords and session cookies travel unencrypted. Set web.https: true."
+        ]
+    return []
+
+
 def run_web_dashboard(database: Database, config: Config, blocking: bool) -> Optional[threading.Thread]:
     """Starts the Flask dashboard.
 
@@ -325,6 +363,9 @@ def run_web_dashboard(database: Database, config: Config, blocking: bool) -> Opt
     main thread.
     """
     from src.web import create_app
+
+    for warning in dashboard_security_warnings(config):
+        logger.warning(warning)
 
     app = create_app(
         database,
