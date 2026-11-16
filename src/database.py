@@ -538,6 +538,104 @@ class Database:
             )
             self._conn.commit()
 
+    def create_user(self, username: str, password_hash: str, role: str) -> User:
+        """Adds a dashboard account and returns it. Takes an already-hashed
+        password (see src/auth.py) -- nothing here ever sees a plaintext one.
+        Raises ValueError if the username is taken (case-insensitively).
+        Validation of the username, password and role is src/auth.py's job."""
+        user = User(username=username, password_hash=password_hash, role=role)
+        with self._lock:
+            try:
+                cursor = self._conn.execute(
+                    "INSERT INTO users (username, password_hash, role, created_at, disabled) "
+                    "VALUES (?, ?, ?, ?, 0)",
+                    (user.username, user.password_hash, user.role, user.created_at.isoformat()),
+                )
+            except sqlite3.IntegrityError as exc:
+                self._conn.rollback()
+                if "UNIQUE" in str(exc):
+                    raise ValueError(f"user {username!r} already exists") from exc
+                raise ValueError(f"invalid user: {exc}") from exc
+            self._conn.commit()
+            user.id = cursor.lastrowid
+        return user
+
+    def get_user(self, user_id: int) -> Optional[User]:
+        """The account with this id, or None."""
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {_USER_COLUMNS} FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        return _row_to_user(row) if row else None
+
+    def get_user_by_username(self, username: str) -> Optional[User]:
+        """The account with this username (case-insensitive), or None."""
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {_USER_COLUMNS} FROM users WHERE username = ?", (username,)
+            ).fetchone()
+        return _row_to_user(row) if row else None
+
+    def list_users(self) -> List[User]:
+        """Every account, sorted by username (case-insensitive)."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {_USER_COLUMNS} FROM users ORDER BY username"
+            ).fetchall()
+        return [_row_to_user(row) for row in rows]
+
+    def count_users(self) -> int:
+        """How many accounts exist, enabled or not."""
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()
+        return int(row["c"])
+
+    def count_enabled_admins(self) -> int:
+        """How many enabled accounts have the admin role."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND disabled = 0"
+            ).fetchone()
+        return int(row["c"])
+
+    def _update_user(self, user_id: int, column: str, value: Any) -> bool:
+        """Sets one column on one account; True if the account exists."""
+        with self._lock:
+            try:
+                cursor = self._conn.execute(
+                    f"UPDATE users SET {column} = ? WHERE id = ?", (value, user_id)
+                )
+            except sqlite3.IntegrityError as exc:
+                self._conn.rollback()
+                raise ValueError(f"invalid {column}: {exc}") from exc
+            self._conn.commit()
+        return cursor.rowcount > 0
+
+    def update_user_password(self, user_id: int, password_hash: str) -> bool:
+        """Replaces an account's password hash; True if the account exists."""
+        return self._update_user(user_id, "password_hash", password_hash)
+
+    def set_user_role(self, user_id: int, role: str) -> bool:
+        """Changes an account's role; True if the account exists. Raises
+        ValueError for anything but "admin"/"viewer"."""
+        return self._update_user(user_id, "role", role)
+
+    def set_user_disabled(self, user_id: int, disabled: bool) -> bool:
+        """Disables or re-enables an account; True if the account exists."""
+        return self._update_user(user_id, "disabled", 1 if disabled else 0)
+
+    def update_last_login(self, user_id: int, when: Optional[datetime] = None) -> bool:
+        """Records a successful login (now, unless `when` is given)."""
+        when = when or datetime.now(timezone.utc)
+        return self._update_user(user_id, "last_login_at", when.isoformat())
+
+    def delete_user(self, user_id: int) -> bool:
+        """Removes an account; True if it existed."""
+        with self._lock:
+            cursor = self._conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            self._conn.commit()
+        return cursor.rowcount > 0
+
     def close(self) -> None:
         """closes the connection, call this when you're done with it"""
         with self._lock:
