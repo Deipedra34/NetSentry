@@ -1,0 +1,153 @@
+{% extends "auth_base.html" %}
+{% block title %}Users &middot; NetSentry{% endblock %}
+{% block styles %}
+  .user-nav { display: flex; align-items: center; gap: 0.6rem; font-size: 0.85rem; color: var(--muted); }
+  .user-nav form { margin: 0; }
+  h2 { font-size: 1.05rem; margin: 0 0 0.75rem; }
+  .create { margin-bottom: 1.5rem; }
+  .create form { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: flex-end; }
+  .create label { display: flex; flex-direction: column; gap: 0.3rem; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  thead th {
+    text-align: left;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  tbody td {
+    padding: 0.65rem 1rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.9rem;
+    vertical-align: top;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  .actions { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+  .actions form { display: flex; gap: 0.35rem; align-items: center; margin: 0; }
+  .actions input, .actions select { padding: 0.3rem 0.5rem; font-size: 0.8rem; }
+  .actions input[type=password] { width: 9.5rem; }
+  .badge {
+    display: inline-block;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+  }
+  .badge.admin { background: rgba(240,169,60,0.15); color: var(--warn); }
+  .badge.viewer { background: rgba(91,141,239,0.15); color: var(--info); }
+  .badge.disabled { background: rgba(239,91,91,0.15); color: var(--danger); }
+  .badge.enabled { background: rgba(79,209,197,0.12); color: var(--accent); }
+  .table-wrap { overflow-x: auto; }
+{% endblock %}
+{% block header_right %}
+<div class="user-nav">
+  <span>{{ current_user.username }} &middot; {{ current_user.role }}</span>
+  <a class="button" href="/">Dashboard</a>
+  <form method="post" action="/logout">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit" class="button">Sign out</button>
+  </form>
+</div>
+{% endblock %}
+{% block content %}
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for category, message in messages %}
+    <div class="message {{ category }}" role="status">{{ message }}</div>
+  {% endfor %}
+{% endwith %}
+
+<section class="card create">
+  <h2>Create user</h2>
+  <form method="post" action="/admin/users" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label><span class="label">Username</span>
+      <input type="text" name="username" maxlength="32" required autocapitalize="none" spellcheck="false">
+    </label>
+    <label><span class="label">Password</span>
+      <input type="password" name="password" minlength="{{ min_password_length }}" autocomplete="new-password" required>
+    </label>
+    <label><span class="label">Confirm password</span>
+      <input type="password" name="confirm" minlength="{{ min_password_length }}" autocomplete="new-password" required>
+    </label>
+    <label><span class="label">Role</span>
+      <select name="role">
+        <option value="viewer">viewer</option>
+        <option value="admin">admin</option>
+      </select>
+    </label>
+    <button type="submit" class="button primary">Create</button>
+  </form>
+  <p class="muted" style="font-size: 0.8rem; margin: 0.75rem 0 0;">
+    Usernames: 3&ndash;32 letters, digits, dot, dash or underscore. Passwords: at least
+    {{ min_password_length }} characters, not the username. Admins can do everything;
+    viewers can only read the dashboard, events and reports.
+  </p>
+</section>
+
+<h2>Users</h2>
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Username</th>
+      <th>Role</th>
+      <th>Status</th>
+      <th>Created</th>
+      <th>Last sign-in</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for user in users %}
+    <tr>
+      <td>{{ user.username }}{% if user.id == current_user.id %} <span class="muted">(you)</span>{% endif %}</td>
+      <td><span class="badge {{ user.role }}">{{ user.role }}</span></td>
+      <td>{% if user.disabled %}<span class="badge disabled">disabled</span>{% else %}<span class="badge enabled">enabled</span>{% endif %}</td>
+      <td class="muted">{{ user.created_at.strftime("%Y-%m-%d %H:%M") }} UTC</td>
+      <td class="muted">{% if user.last_login_at %}{{ user.last_login_at.strftime("%Y-%m-%d %H:%M") }} UTC{% else %}never{% endif %}</td>
+      <td>
+        <div class="actions">
+          <form method="post" action="/admin/users/{{ user.id }}/role">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <select name="role" aria-label="Role for {{ user.username }}">
+              <option value="viewer"{% if user.role == "viewer" %} selected{% endif %}>viewer</option>
+              <option value="admin"{% if user.role == "admin" %} selected{% endif %}>admin</option>
+            </select>
+            <button type="submit" class="button">Set role</button>
+          </form>
+          <form method="post" action="/admin/users/{{ user.id }}/password" autocomplete="off">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="password" name="password" placeholder="New password" autocomplete="new-password"
+                   aria-label="New password for {{ user.username }}" required>
+            <input type="password" name="confirm" placeholder="Confirm" autocomplete="new-password"
+                   aria-label="Confirm new password for {{ user.username }}" required>
+            <button type="submit" class="button">Reset password</button>
+          </form>
+          {% if user.id != current_user.id %}
+            <form method="post" action="/admin/users/{{ user.id }}/{{ 'enable' if user.disabled else 'disable' }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="button">{{ "Enable" if user.disabled else "Disable" }}</button>
+            </form>
+            <form method="post" action="/admin/users/{{ user.id }}/delete"
+                  onsubmit="return confirm('Delete user {{ user.username }}? This cannot be undone.');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="button danger">Delete</button>
+            </form>
+          {% endif %}
+        </div>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

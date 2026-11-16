@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from flask import Flask, Response, g, jsonify, redirect, render_template, request
+from flask import Flask, Response, flash, g, jsonify, redirect, render_template, request
 
 from src.auth import login_required
 from src.config import AuthConfig, ReportsConfig
@@ -226,6 +226,113 @@ def _init_auth(
         return redirect("/login")
 
 
+def _init_user_management(app: Flask, database: Database, auth_config: AuthConfig) -> None:
+    """The admin-only user management page at /admin/users: list, create,
+    reset password, change role, disable/enable and delete accounts. Every
+    action is a CSRF-protected POST (checked by _init_auth's hook) and goes
+    through the same rules as the CLI (src/auth.py), including the
+    last-admin and own-account protections."""
+    from src import auth
+
+    min_length = auth_config.min_password_length
+
+    def _back() -> Any:
+        return redirect("/admin/users")
+
+    def _run(action: Callable[[], str]) -> Any:
+        try:
+            flash(action(), "success")
+        except auth.AccountError as exc:
+            flash(str(exc), "error")
+        return _back()
+
+    def _target(user_id: int) -> str:
+        user = database.get_user(user_id)
+        if user is None:
+            raise auth.AccountError("That user no longer exists.")
+        return user.username
+
+    def _new_password() -> str:
+        password = request.form.get("password") or ""
+        if password != (request.form.get("confirm") or ""):
+            raise auth.AccountError("The passwords don't match.")
+        return password
+
+    def _actor() -> str:
+        return g.current_user.username
+
+    @app.route("/admin/users", methods=["GET"])
+    @auth.admin_required
+    def admin_users() -> Any:
+        return render_template(
+            "admin_users.html", users=database.list_users(), min_password_length=min_length
+        )
+
+    @app.route("/admin/users", methods=["POST"])
+    @auth.admin_required
+    def admin_create_user() -> Any:
+        def action() -> str:
+            username = (request.form.get("username") or "").strip()
+            role = request.form.get("role") or auth.ROLE_VIEWER
+            user = auth.create_account(database, username, _new_password(), role, min_length)
+            logger.info("Admin %r created dashboard user %r (%s)", _actor(), user.username, role)
+            return f"Created {user.role} {user.username!r}."
+
+        return _run(action)
+
+    @app.route("/admin/users/<int:user_id>/password", methods=["POST"])
+    @auth.admin_required
+    def admin_reset_password(user_id: int) -> Any:
+        def action() -> str:
+            user = auth.set_account_password(database, _target(user_id), _new_password(), min_length)
+            logger.info("Admin %r reset the password of %r", _actor(), user.username)
+            return f"Password for {user.username!r} updated."
+
+        return _run(action)
+
+    @app.route("/admin/users/<int:user_id>/role", methods=["POST"])
+    @auth.admin_required
+    def admin_set_role(user_id: int) -> Any:
+        def action() -> str:
+            user = auth.set_account_role(database, _target(user_id), request.form.get("role") or "")
+            logger.info("Admin %r set the role of %r to %s", _actor(), user.username, user.role)
+            return f"{user.username!r} is now {user.role}."
+
+        return _run(action)
+
+    def _set_disabled(user_id: int, disabled: bool) -> Any:
+        def action() -> str:
+            user = auth.set_account_disabled(
+                database, _target(user_id), disabled, acting_user_id=g.current_user.id
+            )
+            verb = "disabled" if disabled else "enabled"
+            logger.info("Admin %r %s dashboard user %r", _actor(), verb, user.username)
+            return f"{user.username!r} {verb}."
+
+        return _run(action)
+
+    @app.route("/admin/users/<int:user_id>/disable", methods=["POST"])
+    @auth.admin_required
+    def admin_disable_user(user_id: int) -> Any:
+        return _set_disabled(user_id, True)
+
+    @app.route("/admin/users/<int:user_id>/enable", methods=["POST"])
+    @auth.admin_required
+    def admin_enable_user(user_id: int) -> Any:
+        return _set_disabled(user_id, False)
+
+    @app.route("/admin/users/<int:user_id>/delete", methods=["POST"])
+    @auth.admin_required
+    def admin_delete_user(user_id: int) -> Any:
+        def action() -> str:
+            username = _target(user_id)
+            auth.delete_account(database, username, acting_user_id=g.current_user.id)
+            logger.info("Admin %r deleted dashboard user %r", _actor(), username)
+            return f"Deleted {username!r}."
+
+        return _run(action)
+
+
 def create_app(
     database: Database,
     refresh_interval: int = 5,
@@ -260,6 +367,7 @@ def create_app(
         assert auth_config is not None
         _init_sessions(app, auth_config, tls)
         _init_auth(app, database, auth_config, clock)
+        _init_user_management(app, database, auth_config)
         if username or password:
             logger.info(
                 "auth.enabled is on, so web.username/web.password (Basic Auth) are ignored."
