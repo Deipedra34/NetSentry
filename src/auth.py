@@ -48,6 +48,14 @@ CSRF_FORM_FIELD = "csrf_token"
 CSRF_HEADER = "X-CSRF-Token"
 STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
+# everything a login session keeps in its (signed, not encrypted) cookie:
+# the user id and timestamps, plus the CSRF token -- never the username,
+# role or anything else that could go stale; those are read from the
+# database on every request
+SESSION_USER_ID = "user_id"
+SESSION_STARTED = "started_at"
+SESSION_LAST_SEEN = "last_seen_at"
+
 
 class AccountError(ValueError):
     """An account change that was refused; the message is safe to show to
@@ -362,3 +370,47 @@ def safe_next_url(target: Optional[str], default: str = "/") -> str:
     if parts.scheme or parts.netloc:
         return default
     return target
+
+
+def start_login_session(user_id: int, now: float) -> None:
+    """Replaces whatever session the browser had with a fresh login session
+    for user_id: the old contents (including the pre-login CSRF token) are
+    thrown away and a new cookie is issued, so a session planted before
+    login (session fixation) is never the one that ends up signed in."""
+    session.clear()
+    session.permanent = True
+    session[SESSION_USER_ID] = user_id
+    session[SESSION_STARTED] = now
+    session[SESSION_LAST_SEEN] = now
+    rotate_csrf_token()
+
+
+def end_login_session() -> None:
+    """Signs the browser out by clearing its session."""
+    session.clear()
+
+
+def load_session_user(
+    database: Database, now: float, lifetime_seconds: float, idle_seconds: float
+) -> Optional[User]:
+    """The signed-in user for this request, or None. Ends the session (and
+    returns None) once it's older than lifetime_seconds, has been idle for
+    idle_seconds, or its user has been deleted or disabled -- so a disabled
+    account loses access on its very next request. Otherwise records now as
+    the last activity for the idle timeout."""
+    user_id = session.get(SESSION_USER_ID)
+    if user_id is None:
+        return None
+    started = float(session.get(SESSION_STARTED, 0))
+    last_seen = float(session.get(SESSION_LAST_SEEN, 0))
+    user = database.get_user(int(user_id))
+    if (
+        now - started >= lifetime_seconds
+        or now - last_seen >= idle_seconds
+        or user is None
+        or user.disabled
+    ):
+        end_login_session()
+        return None
+    session[SESSION_LAST_SEEN] = now
+    return user

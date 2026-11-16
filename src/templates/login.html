@@ -1,0 +1,27 @@
+{% extends "auth_base.html" %}
+{% block title %}Sign in &middot; NetSentry{% endblock %}
+{% block styles %}
+  .login { max-width: 360px; margin: 4rem auto 0; }
+  .login h2 { font-size: 1.1rem; margin: 0 0 1rem; }
+  .login label { display: block; margin-bottom: 0.9rem; }
+  .login input { display: block; width: 100%; margin-top: 0.35rem; }
+  .login .button { width: 100%; padding: 0.55rem; font-size: 0.9rem; margin-top: 0.4rem; }
+{% endblock %}
+{% block content %}
+<section class="card login">
+  <h2>Sign in</h2>
+  {% if error %}<div class="message error" role="alert">{{ error }}</div>{% endif %}
+  <form method="post" action="/login" autocomplete="on">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <label><span class="label">Username</span>
+      <input type="text" name="username" value="{{ username }}" autocomplete="username"
+             autocapitalize="none" spellcheck="false" maxlength="32" required autofocus>
+    </label>
+    <label><span class="label">Password</span>
+      <input type="password" name="password" autocomplete="current-password" required>
+    </label>
+    <button type="submit" class="button primary">Sign in</button>
+  </form>
+</section>
+{% endblock %}

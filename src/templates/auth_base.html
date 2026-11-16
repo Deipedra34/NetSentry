@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}NetSentry{% endblock %}</title>
+<style>
+  /* same palette and header as dashboard.html */
+  :root {
+    --bg: #0f1420;
+    --panel: #161d2e;
+    --border: #263149;
+    --text: #e6eaf2;
+    --muted: #8a96ad;
+    --accent: #4fd1c5;
+    --danger: #ef5b5b;
+    --warn: #f0a93c;
+    --info: #5b8def;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    padding: 1.25rem 2rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  header h1 { font-size: 1.35rem; margin: 0; letter-spacing: 0.02em; }
+  header h1 a { color: inherit; text-decoration: none; }
+  header h1 span { color: var(--accent); }
+  main { padding: 1.5rem 2rem 3rem; max-width: 1200px; margin: 0 auto; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+  }
+  .label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+  }
+  input, select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.5rem 0.65rem;
+    font: inherit;
+    font-size: 0.9rem;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  .button {
+    background: var(--panel);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.3rem 0.9rem;
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .button:hover { color: var(--accent); border-color: var(--accent); }
+  .button.primary { color: var(--accent); border-color: var(--accent); background: rgba(79,209,197,0.1); }
+  .button.danger:hover { color: var(--danger); border-color: var(--danger); }
+  .message {
+    border-radius: 8px;
+    padding: 0.6rem 0.85rem;
+    font-size: 0.88rem;
+    margin-bottom: 1rem;
+  }
+  .message.error { background: rgba(239,91,91,0.12); color: var(--danger); border: 1px solid rgba(239,91,91,0.35); }
+  .message.success { background: rgba(79,209,197,0.1); color: var(--accent); border: 1px solid rgba(79,209,197,0.35); }
+  .muted { color: var(--muted); }
+  code { color: var(--accent); }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.75rem;
+    padding: 2rem 0 1rem;
+  }
+  {% block styles %}{% endblock %}
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="/">Net<span>Sentry</span></a></h1>
+  {% block header_right %}{% endblock %}
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer>by Deipedra</footer>
+</body>
+</html>

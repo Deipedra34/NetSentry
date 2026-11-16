@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, g, jsonify, redirect, render_template, request
 
 from src.config import AuthConfig, ReportsConfig
 from src.database import Database
@@ -117,22 +117,85 @@ def _error_response(message: str, status: int) -> Any:
     return Response(message, status, mimetype="text/plain")
 
 
-def _init_auth(app: Flask) -> None:
-    """Request hooks and template helpers for the session login. Only
-    called when auth.enabled is on."""
-    from src.auth import csrf_check_needed, csrf_token, csrf_token_valid
+GENERIC_LOGIN_ERROR = "Invalid username or password."
+LOCKED_OUT_ERROR = "Too many failed sign-in attempts. Please try again later."
+
+
+def _init_auth(
+    app: Flask, database: Database, auth_config: AuthConfig, clock: Callable[[], float]
+) -> None:
+    """Request hooks, template helpers and the login route for the session
+    login. Only called when auth.enabled is on."""
+    from src import auth
+
+    limiter = auth.LoginLimiter(
+        auth_config.max_failed_logins, auth_config.lockout_minutes * 60, clock=clock
+    )
+    app.config["NETSENTRY_LOGIN_LIMITER"] = limiter
+    lifetime_seconds = auth_config.session_lifetime_minutes * 60
+    idle_seconds = auth_config.idle_timeout_minutes * 60
 
     @app.before_request
     def _check_csrf() -> Any:
-        if csrf_check_needed() and not csrf_token_valid():
+        if auth.csrf_check_needed() and not auth.csrf_token_valid():
             return _error_response(
                 "Missing or invalid CSRF token. Reload the page and try again.", 400
             )
         return None
 
+    @app.before_request
+    def _load_user() -> None:
+        g.current_user = auth.load_session_user(database, clock(), lifetime_seconds, idle_seconds)
+
     @app.context_processor
     def _auth_template_helpers() -> Dict[str, Any]:
-        return {"csrf_token": csrf_token}
+        return {"csrf_token": auth.csrf_token, "current_user": g.get("current_user")}
+
+    @app.route("/login", methods=["GET", "POST"])
+    def login() -> Any:
+        """The sign-in form (GET) and its submission (POST). Failures get
+        the same message, and take about the same time, whether or not the
+        username exists; too many failures per username or client IP lock
+        further attempts out for auth.lockout_minutes."""
+        next_url = auth.safe_next_url(request.values.get("next"))
+        if request.method == "GET":
+            if g.current_user is not None:
+                return redirect(next_url)
+            return render_template("login.html", next_url=next_url, username="", error=None)
+
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        client_ip = request.remote_addr
+        keys = auth.limiter_keys(username, client_ip)
+
+        def _failed(message: str, status: int) -> Any:
+            page = render_template(
+                "login.html", next_url=next_url, username=username, error=message
+            )
+            return page, status
+
+        if limiter.is_locked(*keys):
+            logger.warning("Dashboard login refused for %r from %s: locked out", username, client_ip)
+            return _failed(LOCKED_OUT_ERROR, 429)
+
+        user = database.get_user_by_username(username) if username else None
+        if len(password) <= auth.MAX_PASSWORD_LENGTH:
+            valid = auth.verify_password(user.password_hash if user else None, password)
+        else:
+            valid = auth.verify_password(None, "")  # same work, never a match
+        if not valid or user is None or user.disabled:
+            limiter.record_failure(*keys)
+            logger.warning("Failed dashboard login for %r from %s", username, client_ip)
+            return _failed(GENERIC_LOGIN_ERROR, 401)
+
+        limiter.reset(keys[0])
+        now = clock()
+        auth.start_login_session(user.id, now)  # type: ignore[arg-type]
+        database.update_last_login(  # type: ignore[arg-type]
+            user.id, datetime.datetime.fromtimestamp(now, tz=datetime.timezone.utc)
+        )
+        logger.info("User %r signed in to the dashboard from %s", user.username, client_ip)
+        return redirect(next_url)
 
 
 def create_app(
@@ -168,7 +231,7 @@ def create_app(
     if auth_enabled:
         assert auth_config is not None
         _init_sessions(app, auth_config, tls)
-        _init_auth(app)
+        _init_auth(app, database, auth_config, clock)
         if username or password:
             logger.info(
                 "auth.enabled is on, so web.username/web.password (Basic Auth) are ignored."
