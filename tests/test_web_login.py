@@ -258,3 +258,13 @@ def test_passwords_never_logged(client: FlaskClient, caplog: pytest.LogCaptureFi
         login(client, "alice")
     assert "wrong-secret-password-1" not in caplog.text
     assert "a-long-enough-password" not in caplog.text
+
+
+def test_oversized_username_is_capped(client: FlaskClient, caplog: pytest.LogCaptureFixture) -> None:
+    """A huge username can't bloat the lockout table or the log."""
+    huge = "x" * 100_000
+    with caplog.at_level("WARNING"):
+        assert login(client, huge, "not-the-right-password").status_code == 401
+    limiter = client.application.config["NETSENTRY_LOGIN_LIMITER"]
+    assert all(len(key) < 100 for key in limiter._entries)
+    assert huge not in caplog.text

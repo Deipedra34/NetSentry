@@ -181,7 +181,9 @@ def _init_auth(
                 return redirect(next_url)
             return render_template("login.html", next_url=next_url, username="", error=None)
 
-        username = (request.form.get("username") or "").strip()
+        # no real username is longer than 32 characters; capping it keeps
+        # oversized junk out of the limiter's keys (memory) and the log
+        username = (request.form.get("username") or "").strip()[:64]
         password = request.form.get("password") or ""
         client_ip = request.remote_addr
         keys = auth.limiter_keys(username, client_ip)
