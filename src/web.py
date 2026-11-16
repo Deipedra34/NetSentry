@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from flask import Flask, Response, g, jsonify, redirect, render_template, request
 
+from src.auth import login_required
 from src.config import AuthConfig, ReportsConfig
 from src.database import Database
 
@@ -275,6 +276,7 @@ def create_app(
         return response
 
     @app.route("/")
+    @login_required
     def dashboard() -> str:
         """just renders the dashboard template"""
         return render_template(
@@ -283,6 +285,7 @@ def create_app(
         )
 
     @app.route("/api/events")
+    @login_required
     def api_events() -> Any:
         """JSON list of recent events, newest first. Takes optional query
         params: limit (default 100, capped at 1000 so nobody accidentally
@@ -304,6 +307,7 @@ def create_app(
         return jsonify(payload)
 
     @app.route("/api/stats")
+    @login_required
     def api_stats() -> Any:
         """total events + a breakdown by type, for the summary cards up top"""
         stats: Dict[str, Any] = {
@@ -322,6 +326,7 @@ def create_app(
         return jsonify({"error": f"invalid range, expected one of: {valid}"}), 400
 
     @app.route("/api/stats/timeline")
+    @login_required
     def api_stats_timeline() -> Any:
         """Event counts per time bucket, one series per event type, for the
         dashboard's timeline chart. ?range= is 1h (1-minute buckets), 24h
@@ -350,6 +355,7 @@ def create_app(
         )
 
     @app.route("/api/stats/distribution")
+    @login_required
     def api_stats_distribution() -> Any:
         """Total events per type within ?range= (same values as the timeline
         endpoint), for the dashboard's distribution chart. Every known type
@@ -371,6 +377,7 @@ def create_app(
         )
 
     @app.route("/api/report")
+    @login_required
     def api_report() -> Any:
         """A PDF summary report (see src/reports/) of the last ?range=: 1h,
         24h (the default), 7d or 30d, as a file download -- what the
@@ -397,6 +404,7 @@ def create_app(
         )
 
     @app.route("/api/blocked_ips")
+    @login_required
     def api_blocked_ips() -> Any:
         """JSON list of currently-blocked IPs (see AutoBlocker in
         src/auto_block.py), newest first. Read-only -- blocks/unblocks
@@ -404,6 +412,9 @@ def create_app(
         blocked = database.get_blocked_ips()
         return jsonify([b.to_dict() for b in blocked])
 
+    # deliberately public, even with auth.enabled: it reveals nothing but
+    # "the dashboard is up", and the Docker HEALTHCHECK (and other uptime
+    # monitors) can't sign in. Every other route needs @login_required.
     @app.route("/healthz")
     def healthz() -> Any:
         """just so uptime monitors have something to ping"""

@@ -280,6 +280,15 @@ function formatThreatIntel(ti) {
   return parts.length ? parts.join("<br>") : '<span class="muted">&mdash;</span>';
 }
 
+// With dashboard authentication on, an expired or ended session makes the
+// API answer 401 -- send the browser to the login page instead of polling on.
+function checkSignedIn(...responses) {
+  if (responses.some(r => r.status === 401)) {
+    window.location.href = "/login?next=" + encodeURIComponent(window.location.pathname);
+    throw new Error("signed out");
+  }
+}
+
 async function refreshEvents() {
   try {
     const [eventsRes, statsRes, blockedRes] = await Promise.all([
@@ -287,6 +296,7 @@ async function refreshEvents() {
       fetch("/api/stats"),
       fetch("/api/blocked_ips"),
     ]);
+    checkSignedIn(eventsRes, statsRes, blockedRes);
     const events = await eventsRes.json();
     const stats = await statsRes.json();
     const blockedIps = await blockedRes.json();
@@ -470,6 +480,7 @@ async function refreshCharts() {
       fetch(`/api/stats/timeline?range=${range}`),
       fetch(`/api/stats/distribution?range=${range}`),
     ]);
+    checkSignedIn(timelineRes, distributionRes);
     renderTimeline(await timelineRes.json());
     renderDistribution(await distributionRes.json());
   } catch (err) {
