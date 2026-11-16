@@ -481,6 +481,30 @@ class ReportsConfig:
 
 
 @dataclass
+class AuthConfig:
+    """Dashboard user accounts, login sessions and roles -- see src/auth.py
+    and README.md "Dashboard Authentication". Disabled by default so
+    existing installs keep working unchanged; once enabled, the session
+    login replaces web.username/web.password Basic Auth."""
+
+    enabled: bool = False
+    # absolute session length, however active the user is
+    session_lifetime_minutes: int = 480
+    # sign out after this long without any request
+    idle_timeout_minutes: int = 60
+    # failed logins for one username or one client IP before a lockout...
+    max_failed_logins: int = 5
+    # ...lasting this long (it always expires on its own)
+    lockout_minutes: int = 15
+    min_password_length: int = 12
+    # random key that signs session cookies, created on first start and
+    # reused after that so sessions survive a restart
+    secret_key_path: str = "data/secret_key"
+    # "auto" (Secure cookies whenever web.https is on), "true" or "false"
+    cookie_secure: str = "auto"
+
+
+@dataclass
 class WebConfig:
     """Flask dashboard settings."""
 
@@ -526,6 +550,7 @@ class Config:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    auth: AuthConfig = field(default_factory=AuthConfig)
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     pcap_export: PcapExportConfig = field(default_factory=PcapExportConfig)
     auto_block: AutoBlockConfig = field(default_factory=AutoBlockConfig)
