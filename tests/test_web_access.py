@@ -48,10 +48,7 @@ def test_dashboard_page_without_session_redirects_to_login(app: Flask) -> None:
 
 
 def test_redirect_keeps_the_query_string(app: Flask) -> None:
-    client = app.test_client()
-    response = client.get("/admin/users?x=1")
-    if response.status_code == 404:  # user management not added yet
-        pytest.skip("no /admin/users route")
+    response = app.test_client().get("/admin/users?x=1")
     assert response.headers["Location"] == "/login?next=%2Fadmin%2Fusers%3Fx%3D1"
 
 
