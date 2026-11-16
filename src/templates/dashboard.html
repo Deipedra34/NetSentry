@@ -52,6 +52,24 @@
   @keyframes pulse {
     0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; }
   }
+  .header-right { display: flex; align-items: center; gap: 1.25rem; }
+  .user-nav { display: flex; align-items: center; gap: 0.6rem; font-size: 0.85rem; color: var(--muted); }
+  .user-nav form { margin: 0; }
+  .user-nav .role { color: var(--accent); }
+  .nav-button {
+    background: var(--panel);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.25rem 0.8rem;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .nav-button:hover { color: var(--accent); border-color: var(--accent); }
   main { padding: 1.5rem 2rem 3rem; max-width: 1200px; margin: 0 auto; }
   .stats {
     display: grid;
@@ -189,7 +207,19 @@
 <body>
 <header>
   <h1>Net<span>Sentry</span></h1>
-  <div class="status"><span class="dot"></span><span id="last-updated">connecting&hellip;</span></div>
+  <div class="header-right">
+    <div class="status"><span class="dot"></span><span id="last-updated">connecting&hellip;</span></div>
+    {% if current_user %}
+    <div class="user-nav">
+      <span>{{ current_user.username }} &middot; <span class="role">{{ current_user.role }}</span></span>
+      {% if current_user.role == "admin" %}<a class="nav-button" href="/admin/users">Users</a>{% endif %}
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="nav-button">Sign out</button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
 </header>
 <main>
   <section class="stats" id="stats">

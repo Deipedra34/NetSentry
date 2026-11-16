@@ -169,3 +169,23 @@ def test_auth_disabled_keeps_legacy_basic_auth(in_memory_db: Database) -> None:
     assert response.headers["WWW-Authenticate"] == 'Basic realm="NetSentry"'
     token = base64.b64encode(b"admin:pw").decode()
     assert client.get("/api/stats", headers={"Authorization": f"Basic {token}"}).status_code == 200
+
+
+def test_header_shows_user_role_and_sign_out(app: Flask) -> None:
+    client = app.test_client()
+    login(client, "alice")
+    page = client.get("/").get_data(as_text=True)
+    assert "alice" in page and "admin" in page
+    assert 'action="/logout"' in page and 'name="csrf_token"' in page
+    assert 'href="/admin/users"' in page
+
+    viewer = app.test_client()
+    login(viewer, "victor")
+    page = viewer.get("/").get_data(as_text=True)
+    assert "victor" in page and 'action="/logout"' in page
+    assert 'href="/admin/users"' not in page
+
+
+def test_header_has_no_user_menu_when_auth_disabled(in_memory_db: Database) -> None:
+    page = create_app(in_memory_db).test_client().get("/").get_data(as_text=True)
+    assert 'action="/logout"' not in page
