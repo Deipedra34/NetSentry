@@ -10,8 +10,11 @@ this is inactive unless `auth.enabled` is set in config.yaml.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import secrets
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional, Tuple
 
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -28,6 +31,10 @@ USERNAME_PATTERN = re.compile(r"[A-Za-z0-9._-]{3,32}", re.ASCII)
 # hashing is deliberately slow, so cap the input -- nobody types more than
 # this, and a multi-megabyte "password" shouldn't tie up a worker
 MAX_PASSWORD_LENGTH = 1024
+
+# bytes of randomness in a freshly generated session secret key; anything
+# shorter found on disk is refused rather than silently used
+SECRET_KEY_BYTES = 32
 
 
 class AccountError(ValueError):
@@ -179,3 +186,37 @@ def delete_account(
     if _is_last_enabled_admin(database, user):
         raise AccountError(f"{user.username!r} is the last enabled admin and cannot be deleted.")
     database.delete_user(user.id)  # type: ignore[arg-type]
+
+
+def load_or_create_secret_key(path: str | Path) -> bytes:
+    """The key Flask signs session cookies with. Created on first start as
+    SECRET_KEY_BYTES random bytes at path (owner read/write only, 0600,
+    where the OS supports it), then read back on every later start so
+    sessions survive a restart. Deleting the file signs everyone out.
+    Raises RuntimeError if an existing file is too short to be a real key.
+    The key itself is never logged."""
+    path = Path(path)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        key = secrets.token_bytes(SECRET_KEY_BYTES)
+        try:
+            # O_EXCL: if two processes race on first start, only one writes
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(key)
+            try:
+                os.chmod(path, 0o600)  # in case the umask got in the way
+            except OSError:
+                pass
+            return key
+
+    key = path.read_bytes()
+    if len(key) < SECRET_KEY_BYTES:
+        raise RuntimeError(
+            f"The session secret key at {path} is shorter than {SECRET_KEY_BYTES} bytes; "
+            "delete the file to have a new one generated."
+        )
+    return key
