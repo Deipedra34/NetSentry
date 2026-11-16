@@ -100,6 +100,34 @@ class ThreatIntelResult:
         }
 
 
+@dataclass
+class User:
+    """One dashboard account (see src/auth.py). password_hash is only ever
+    a werkzeug hash string, never a plaintext password, and is left out of
+    repr() and to_dict() so it can't end up in a log line or API response.
+    username is unique case-insensitively ("Alice" and "alice" are the same
+    account). role is "admin" or "viewer"."""
+
+    username: str
+    password_hash: str = field(repr=False)
+    role: str
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_login_at: Optional[datetime] = None
+    disabled: bool = False
+    id: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """for jsonify() basically, converts to plain dict (no password hash)"""
+        return {
+            "id": self.id,
+            "username": self.username,
+            "role": self.role,
+            "created_at": self.created_at.isoformat(),
+            "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,
+            "disabled": self.disabled,
+        }
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,7 +159,22 @@ CREATE TABLE IF NOT EXISTS threat_intel_cache (
     virustotal_total_engines INTEGER,
     raw_response_summary TEXT NOT NULL DEFAULT ''
 );
+
+-- dashboard accounts (src/auth.py). CREATE ... IF NOT EXISTS, like every
+-- table here, so opening a database from an older version just adds it
+-- and leaves the existing tables alone
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('admin', 'viewer')),
+    created_at TEXT NOT NULL,
+    last_login_at TEXT,
+    disabled INTEGER NOT NULL DEFAULT 0
+);
 """
+
+_USER_COLUMNS = "id, username, password_hash, role, created_at, last_login_at, disabled"
 
 _THREAT_INTEL_COLUMNS = (
     "source_ip, checked_at, abuseipdb_score, abuseipdb_reports, "
@@ -159,6 +202,18 @@ def _row_to_threat_intel(row: sqlite3.Row) -> ThreatIntelResult:
         virustotal_malicious_count=row["virustotal_malicious_count"],
         virustotal_total_engines=row["virustotal_total_engines"],
         raw_response_summary=row["raw_response_summary"],
+    )
+
+
+def _row_to_user(row: sqlite3.Row) -> User:
+    return User(
+        id=row["id"],
+        username=row["username"],
+        password_hash=row["password_hash"],
+        role=row["role"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+        last_login_at=datetime.fromisoformat(row["last_login_at"]) if row["last_login_at"] else None,
+        disabled=bool(row["disabled"]),
     )
 
 
