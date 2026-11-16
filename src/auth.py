@@ -19,6 +19,7 @@ from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from flask import request, session
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -344,3 +345,20 @@ def csrf_token_valid() -> bool:
     if not expected or not sent:
         return False
     return secrets.compare_digest(str(sent), str(expected))
+
+
+def safe_next_url(target: Optional[str], default: str = "/") -> str:
+    """target if it's a local path on this dashboard ("/", "/api/report?x=1"),
+    default otherwise. Used for the login page's ?next= so a crafted link
+    can't bounce someone to another site after they sign in: anything with
+    a scheme or host, a protocol-relative "//host", a backslash (browsers
+    treat a backslash like a slash, so "/" + "\\host" means "//host") or a
+    control character is refused."""
+    if not target or not target.startswith("/") or target.startswith("//"):
+        return default
+    if "\\" in target or any(ord(char) < 32 or ord(char) == 127 for char in target):
+        return default
+    parts = urlsplit(target)
+    if parts.scheme or parts.netloc:
+        return default
+    return target
