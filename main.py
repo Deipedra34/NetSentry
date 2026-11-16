@@ -23,6 +23,11 @@ Some examples (from the project root):
         python main.py --report daily
         python main.py --report custom --from 2026-11-01 --to 2026-11-07
 
+    Dashboard accounts (with auth.enabled in config.yaml; passwords are
+    always prompted for, never passed on the command line):
+        python main.py --create-user alice --role admin
+        python main.py --list-users
+
 Note you'll need root/admin rights for real packet capture (scapy needs it).
 """
 
@@ -33,6 +38,7 @@ import logging
 import sys
 import threading
 from datetime import date, datetime, timedelta
+from getpass import getpass
 from pathlib import Path
 from typing import List, Optional
 
@@ -151,7 +157,117 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         metavar="PATH",
         help="Write the report to this file instead of reports.output_dir.",
     )
+    users_group = parser.add_argument_group(
+        "dashboard users",
+        "Manage dashboard accounts (see README.md 'Dashboard Authentication') and exit. "
+        "Only needs the database, never starts packet capture. Passwords are always "
+        "prompted for, hidden -- never pass one as an argument.",
+    )
+    user_commands = users_group.add_mutually_exclusive_group()
+    user_commands.add_argument(
+        "--create-user", metavar="USERNAME", help="Create an account (needs --role)."
+    )
+    users_group.add_argument(
+        "--role", choices=("admin", "viewer"), help="Role for --create-user: admin or viewer."
+    )
+    user_commands.add_argument(
+        "--set-password", metavar="USERNAME", help="Set a new password for an account."
+    )
+    user_commands.add_argument("--list-users", action="store_true", help="List all accounts.")
+    user_commands.add_argument("--delete-user", metavar="USERNAME", help="Delete an account.")
+    user_commands.add_argument(
+        "--set-role", nargs=2, metavar=("USERNAME", "ROLE"), help="Change an account's role."
+    )
+    user_commands.add_argument("--disable-user", metavar="USERNAME", help="Disable an account.")
+    user_commands.add_argument("--enable-user", metavar="USERNAME", help="Re-enable an account.")
     return parser.parse_args(argv)
+
+
+def _wants_user_command(args: argparse.Namespace) -> bool:
+    return bool(
+        args.create_user or args.set_password or args.list_users or args.delete_user
+        or args.set_role or args.disable_user or args.enable_user
+    )
+
+
+def _prompt_new_password(username: str) -> Optional[str]:
+    """Asks for a new password twice, without echoing it. None if the two
+    entries differ or the prompt was aborted."""
+    try:
+        password = getpass(f"New password for {username}: ")
+        confirm = getpass("Repeat the password: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.", file=sys.stderr)
+        return None
+    if password != confirm:
+        print("Error: the passwords don't match.", file=sys.stderr)
+        return None
+    return password
+
+
+def run_user_command(args: argparse.Namespace, config: Config, database: Database) -> int:
+    """Handles the dashboard account flags (--create-user, --list-users,
+    ...): applies the same rules as the user management page, prints the
+    result and returns the exit code. Never starts packet capture."""
+    from src import auth
+
+    min_length = config.auth.min_password_length
+    if args.role and not args.create_user:
+        print("Error: --role only applies to --create-user.", file=sys.stderr)
+        return 1
+    try:
+        if args.create_user:
+            if not args.role:
+                print("Error: --create-user needs --role admin or --role viewer.", file=sys.stderr)
+                return 1
+            username = auth.validate_username(args.create_user)
+            if database.get_user_by_username(username) is not None:
+                raise auth.AccountError(f"A user named {username!r} already exists.")
+            password = _prompt_new_password(username)
+            if password is None:
+                return 1
+            user = auth.create_account(database, username, password, args.role, min_length)
+            logger.info("CLI: created dashboard user %r (%s)", user.username, user.role)
+            print(f"Created {user.role} user {user.username!r}.")
+            if not config.auth.enabled:
+                print("Note: auth.enabled is false in the config, so the dashboard doesn't ask for a login yet.")
+        elif args.set_password:
+            user = database.get_user_by_username(args.set_password)
+            if user is None:
+                raise auth.AccountError(f"No user named {args.set_password!r}.")
+            password = _prompt_new_password(user.username)
+            if password is None:
+                return 1
+            auth.set_account_password(database, user.username, password, min_length)
+            logger.info("CLI: set a new password for dashboard user %r", user.username)
+            print(f"Password for {user.username!r} updated.")
+        elif args.list_users:
+            users = database.list_users()
+            if not users:
+                print("No dashboard users yet. Create one with --create-user NAME --role admin.")
+            for user in users:
+                last = user.last_login_at.strftime("%Y-%m-%d %H:%M UTC") if user.last_login_at else "never"
+                status = "disabled" if user.disabled else "enabled"
+                print(f"{user.username:<32} {user.role:<7} {status:<9} last sign-in: {last}")
+        elif args.delete_user:
+            auth.delete_account(database, args.delete_user)
+            logger.info("CLI: deleted dashboard user %r", args.delete_user)
+            print(f"Deleted {args.delete_user!r}.")
+        elif args.set_role:
+            username, role = args.set_role
+            user = auth.set_account_role(database, username, role)
+            logger.info("CLI: set the role of dashboard user %r to %s", user.username, role)
+            print(f"{user.username!r} is now {user.role}.")
+        else:
+            disabled = bool(args.disable_user)
+            user = auth.set_account_disabled(database, args.disable_user or args.enable_user, disabled)
+            verb = "Disabled" if disabled else "Enabled"
+            logger.info("CLI: %s dashboard user %r", verb.lower(), user.username)
+            print(f"{verb} {user.username!r}.")
+    except auth.AccountError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _parse_report_time(value: str, end: bool) -> datetime:
@@ -307,6 +423,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.report:
         try:
             return run_report(args, config, database)
+        finally:
+            database.close()
+
+    if _wants_user_command(args) or args.role:
+        try:
+            return run_user_command(args, config, database)
         finally:
             database.close()
 
