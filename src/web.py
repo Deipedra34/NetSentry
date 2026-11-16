@@ -342,6 +342,7 @@ def create_app(
     auth_config: Optional[AuthConfig] = None,
     tls: bool = False,
     clock: Callable[[], float] = time.time,
+    disable_auth: bool = False,
 ) -> Flask:
     """Builds the Flask app. refresh_interval just gets passed through to the
     template so the JS knows how often to poll. username/password enable
@@ -355,12 +356,16 @@ def create_app(
     Basic Auth is then ignored. tls says whether the dashboard is served
     over https (for auth.cookie_secure: auto). clock is injectable so tests
     can move time forward instead of sleeping.
+
+    disable_auth=True turns every kind of login off, whatever the other
+    arguments say -- for desktop_app.py, which serves the dashboard on a
+    loopback-only port to its own native window.
     """
     app = Flask(__name__)
     app.config["NETSENTRY_DB"] = database
     app.config["NETSENTRY_REFRESH_INTERVAL"] = refresh_interval
 
-    auth_enabled = bool(auth_config is not None and auth_config.enabled)
+    auth_enabled = bool(auth_config is not None and auth_config.enabled) and not disable_auth
     app.config["NETSENTRY_AUTH_ENABLED"] = auth_enabled
     app.config["NETSENTRY_CLOCK"] = clock
     if auth_enabled:
@@ -374,7 +379,7 @@ def create_app(
             )
 
     # legacy Basic Auth, only when the session login isn't in use
-    auth_required = bool(username and password) and not auth_enabled
+    auth_required = bool(username and password) and not auth_enabled and not disable_auth
 
     @app.before_request
     def _require_auth():

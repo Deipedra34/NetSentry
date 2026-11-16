@@ -20,8 +20,9 @@ Needs admin/root for live capture, same as main.py. Requires the extra
 `pywebview` dependency -- see requirements-desktop.txt.
 
 Unlike `main.py --web`, this always serves the dashboard over plain HTTP on
-a loopback-only port with no Basic Auth, regardless of what config.yaml says
-under `web:`. Self-signed HTTPS and a login prompt make sense for a page you
+a loopback-only port with no login at all -- no Basic Auth and no dashboard
+user accounts -- regardless of what config.yaml says under `web:` and
+`auth:`. Self-signed HTTPS and a login prompt make sense for a page you
 open in a real browser -- they're pointless (and often broken) for a page
 this same process is loading into its own native window.
 """
@@ -132,7 +133,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     from src.web import create_app
 
-    app = create_app(database, refresh_interval=config.web.refresh_interval)
+    # loopback-only and loaded by this process's own window: no login
+    app = create_app(database, refresh_interval=config.web.refresh_interval, disable_auth=True)
     port = _find_free_port(config.web.port)
 
     threading.Thread(

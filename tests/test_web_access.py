@@ -189,3 +189,20 @@ def test_header_shows_user_role_and_sign_out(app: Flask) -> None:
 def test_header_has_no_user_menu_when_auth_disabled(in_memory_db: Database) -> None:
     page = create_app(in_memory_db).test_client().get("/").get_data(as_text=True)
     assert 'action="/logout"' not in page
+
+
+def test_disable_auth_turns_every_login_off(in_memory_db: Database, tmp_path: Path) -> None:
+    """What desktop_app.py uses: no session login and no Basic Auth, even
+    with both configured, and no secret key file is created."""
+    key_path = tmp_path / "secret_key"
+    app = create_app(
+        in_memory_db, username="admin", password="pw",
+        auth_config=AuthConfig(enabled=True, secret_key_path=str(key_path)),
+        disable_auth=True,
+    )
+    client = app.test_client()
+    assert client.get("/").status_code == 200
+    for endpoint in API_ENDPOINTS:
+        assert client.get(endpoint).status_code == 200, endpoint
+    assert client.get("/login").status_code == 404
+    assert not key_path.exists()
