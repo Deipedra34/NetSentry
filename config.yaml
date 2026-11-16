@@ -410,6 +410,29 @@ reports:
   top_n_sources: 10 # rows in the top source IPs table
   keep_reports: 30 # delete the oldest scheduled reports beyond this many (0 = keep all)
 
+# Dashboard authentication: user accounts with a login page, sessions and an
+# admin/viewer role split. Disabled by default, so existing installs keep
+# working unchanged (with the legacy web.username/web.password Basic Auth,
+# if set). Once enabled, Basic Auth is no longer used. No account exists
+# until you create one from the CLI:
+#   python main.py --create-user alice --role admin
+# See README.md "Dashboard Authentication".
+auth:
+  enabled: false
+  session_lifetime_minutes: 480 # absolute limit, sign in again after this
+  idle_timeout_minutes: 60 # sign out after this long without a request
+  max_failed_logins: 5 # failures per username or client IP before a lockout...
+  lockout_minutes: 15 # ...lasting this long (it always expires on its own)
+  min_password_length: 12
+  secret_key_path: "data/secret_key" # signs session cookies, created on first start
+  cookie_secure: "auto" # auto (secure when web.https is on) | true | false
+
+# Example for a dashboard reachable from the network (keep web.https on):
+# auth:
+#   enabled: true
+#   idle_timeout_minutes: 30
+#   cookie_secure: "true"
+
 database:
   path: netsentry.db
 
