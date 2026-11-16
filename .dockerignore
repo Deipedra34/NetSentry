@@ -26,6 +26,7 @@ data/*.joblib
 # --- Secrets ---
 .env
 .env.*
+data/secret_key
 
 # --- Editors / OS ---
 .vscode/

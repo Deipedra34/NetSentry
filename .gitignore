@@ -61,6 +61,8 @@ netsentry.log
 .env
 .env.*
 !.env.example
+# dashboard session signing key (auth.secret_key_path)
+data/secret_key
 
 # --- Editors / OS ---
 .vscode/
