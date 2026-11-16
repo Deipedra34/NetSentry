@@ -10,10 +10,29 @@ this is inactive unless `auth.enabled` is set in config.yaml.
 from __future__ import annotations
 
 import hashlib
+import re
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Tuple
 
 from werkzeug.security import check_password_hash, generate_password_hash
+
+from src.database import Database, User
+
+ROLE_ADMIN = "admin"
+ROLE_VIEWER = "viewer"
+# admin: everything, including user management. viewer: read-only dashboard,
+# charts, events and reports.
+ROLES: Tuple[str, ...] = (ROLE_ADMIN, ROLE_VIEWER)
+
+USERNAME_PATTERN = re.compile(r"[A-Za-z0-9._-]{3,32}", re.ASCII)
+# hashing is deliberately slow, so cap the input -- nobody types more than
+# this, and a multi-megabyte "password" shouldn't tie up a worker
+MAX_PASSWORD_LENGTH = 1024
+
+
+class AccountError(ValueError):
+    """An account change that was refused; the message is safe to show to
+    the admin making the change (CLI or user management page)."""
 
 
 @lru_cache(maxsize=None)
@@ -54,3 +73,109 @@ def verify_password(password_hash: Optional[str], password: str) -> bool:
         return check_password_hash(password_hash, password)
     except ValueError:  # malformed hash in the table -- treat as no match
         return False
+
+
+def validate_username(username: str) -> str:
+    """Returns username if it's 3-32 letters, digits, dots, dashes or
+    underscores; raises AccountError otherwise."""
+    if not USERNAME_PATTERN.fullmatch(username or ""):
+        raise AccountError(
+            "Usernames must be 3 to 32 characters: letters, digits, dot, dash or underscore."
+        )
+    return username
+
+
+def validate_password(password: str, username: str, min_length: int) -> None:
+    """Raises AccountError unless password is at least min_length
+    characters (and at most MAX_PASSWORD_LENGTH) and isn't the username."""
+    if len(password) < min_length:
+        raise AccountError(f"Passwords must be at least {min_length} characters long.")
+    if len(password) > MAX_PASSWORD_LENGTH:
+        raise AccountError(f"Passwords must be at most {MAX_PASSWORD_LENGTH} characters long.")
+    if password.casefold() == username.casefold():
+        raise AccountError("The password must not be the same as the username.")
+
+
+def validate_role(role: str) -> str:
+    """Returns role if it's one of ROLES; raises AccountError otherwise."""
+    if role not in ROLES:
+        raise AccountError(f"Unknown role {role!r}, expected one of: {', '.join(ROLES)}.")
+    return role
+
+
+def _require_user(database: Database, username: str) -> User:
+    user = database.get_user_by_username(username)
+    if user is None:
+        raise AccountError(f"No user named {username!r}.")
+    return user
+
+
+def _is_last_enabled_admin(database: Database, user: User) -> bool:
+    return user.role == ROLE_ADMIN and not user.disabled and database.count_enabled_admins() <= 1
+
+
+def create_account(
+    database: Database, username: str, password: str, role: str, min_password_length: int
+) -> User:
+    """Validates and creates an account (shared by the CLI and the user
+    management page). Raises AccountError if anything's off."""
+    validate_username(username)
+    validate_role(role)
+    validate_password(password, username, min_password_length)
+    if database.get_user_by_username(username) is not None:
+        raise AccountError(f"A user named {username!r} already exists.")
+    try:
+        return database.create_user(username, hash_password(password), role)
+    except ValueError as exc:  # lost a race with another create
+        raise AccountError(f"A user named {username!r} already exists.") from exc
+
+
+def set_account_password(
+    database: Database, username: str, password: str, min_password_length: int
+) -> User:
+    """Validates and stores a new password for an existing account."""
+    user = _require_user(database, username)
+    validate_password(password, user.username, min_password_length)
+    database.update_user_password(user.id, hash_password(password))  # type: ignore[arg-type]
+    return user
+
+
+def set_account_role(database: Database, username: str, role: str) -> User:
+    """Changes an account's role. Refuses to demote the last enabled admin,
+    so there's always someone left who can manage users."""
+    validate_role(role)
+    user = _require_user(database, username)
+    if role != ROLE_ADMIN and _is_last_enabled_admin(database, user):
+        raise AccountError(f"{user.username!r} is the last enabled admin and cannot be demoted.")
+    database.set_user_role(user.id, role)  # type: ignore[arg-type]
+    user.role = role
+    return user
+
+
+def set_account_disabled(
+    database: Database, username: str, disabled: bool, acting_user_id: Optional[int] = None
+) -> User:
+    """Disables or re-enables an account. Refuses to disable the last
+    enabled admin, or (from the dashboard) the acting admin's own account."""
+    user = _require_user(database, username)
+    if disabled:
+        if acting_user_id is not None and user.id == acting_user_id:
+            raise AccountError("You cannot disable your own account.")
+        if _is_last_enabled_admin(database, user):
+            raise AccountError(f"{user.username!r} is the last enabled admin and cannot be disabled.")
+    database.set_user_disabled(user.id, disabled)  # type: ignore[arg-type]
+    user.disabled = disabled
+    return user
+
+
+def delete_account(
+    database: Database, username: str, acting_user_id: Optional[int] = None
+) -> None:
+    """Deletes an account. Refuses to delete the last enabled admin, or
+    (from the dashboard) the acting admin's own account."""
+    user = _require_user(database, username)
+    if acting_user_id is not None and user.id == acting_user_id:
+        raise AccountError("You cannot delete your own account while signed in.")
+    if _is_last_enabled_admin(database, user):
+        raise AccountError(f"{user.username!r} is the last enabled admin and cannot be deleted.")
+    database.delete_user(user.id)  # type: ignore[arg-type]
