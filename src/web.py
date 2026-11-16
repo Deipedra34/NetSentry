@@ -197,6 +197,16 @@ def _init_auth(
         logger.info("User %r signed in to the dashboard from %s", user.username, client_ip)
         return redirect(next_url)
 
+    @app.route("/logout", methods=["POST"])
+    def logout() -> Any:
+        """Signs out (POST only, so it carries a CSRF token -- a link or
+        image on another site can't sign anyone out)."""
+        user = g.get("current_user")
+        auth.end_login_session()
+        if user is not None:
+            logger.info("User %r signed out of the dashboard", user.username)
+        return redirect("/login")
+
 
 def create_app(
     database: Database,
