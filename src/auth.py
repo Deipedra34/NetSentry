@@ -13,9 +13,12 @@ import hashlib
 import os
 import re
 import secrets
+import threading
+import time
+from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -220,3 +223,84 @@ def load_or_create_secret_key(path: str | Path) -> bytes:
             "delete the file to have a new one generated."
         )
     return key
+
+
+class LoginLimiter:
+    """Locks out login attempts after too many failures, in memory.
+
+    Failures are counted per key -- the login view passes one key for the
+    username and one for the client IP (see limiter_keys()). Once a key
+    collects max_failures failures within lockout_seconds, it's locked for
+    lockout_seconds; while any of a request's keys is locked, the login is
+    refused without even checking the password. A lockout always expires on
+    its own (nothing extends it -- refused attempts aren't counted), so
+    nobody can use it to lock an admin out for good, only to slow them down.
+
+    Holds at most max_entries keys: when full, expired entries go first,
+    then the least recently touched ones, so a flood of made-up usernames
+    can't grow memory without bound. clock is injectable for tests.
+    """
+
+    def __init__(
+        self,
+        max_failures: int,
+        lockout_seconds: float,
+        clock: Callable[[], float] = time.time,
+        max_entries: int = 10_000,
+    ) -> None:
+        self.max_failures = max(1, int(max_failures))
+        self.lockout_seconds = float(lockout_seconds)
+        self.max_entries = max_entries
+        self._clock = clock
+        self._lock = threading.Lock()
+        # key -> (failure timestamps within the window, locked until)
+        self._entries: "OrderedDict[str, Tuple[List[float], float]]" = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def _is_stale(self, entry: Tuple[List[float], float], now: float) -> bool:
+        failures, locked_until = entry
+        return locked_until <= now and all(now - t >= self.lockout_seconds for t in failures)
+
+    def is_locked(self, *keys: str) -> bool:
+        """True while any of keys is locked out."""
+        now = self._clock()
+        with self._lock:
+            return any(
+                key in self._entries and self._entries[key][1] > now for key in keys
+            )
+
+    def record_failure(self, *keys: str) -> None:
+        """Counts one failed login against each of keys, locking any key that
+        reaches max_failures within the window."""
+        now = self._clock()
+        with self._lock:
+            for key in keys:
+                failures, locked_until = self._entries.pop(key, ([], 0.0))
+                failures = [t for t in failures if now - t < self.lockout_seconds]
+                failures.append(now)
+                if len(failures) >= self.max_failures:
+                    failures, locked_until = [], now + self.lockout_seconds
+                self._entries[key] = (failures, locked_until)
+            self._evict(now)
+
+    def reset(self, *keys: str) -> None:
+        """Forgets the failures for keys (e.g. a username after it logs in)."""
+        with self._lock:
+            for key in keys:
+                self._entries.pop(key, None)
+
+    def _evict(self, now: float) -> None:
+        if len(self._entries) <= self.max_entries:
+            return
+        for key in [k for k, entry in self._entries.items() if self._is_stale(entry, now)]:
+            del self._entries[key]
+        while len(self._entries) > self.max_entries:
+            self._entries.popitem(last=False)
+
+
+def limiter_keys(username: str, client_ip: Optional[str]) -> Tuple[str, str]:
+    """The LoginLimiter keys for a login attempt: the username (case-folded,
+    whether or not it exists) and the client IP."""
+    return f"user:{username.casefold()}", f"ip:{client_ip or 'unknown'}"
