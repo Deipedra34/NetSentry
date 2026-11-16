@@ -10,11 +10,12 @@ from flask import Flask
 
 from src import auth
 from src.database import Database
-from tests.auth_helpers import csrf_from_session, make_app
+from tests.auth_helpers import add_user, csrf_from_session, make_app
 
 
 @pytest.fixture()
 def app(in_memory_db: Database, tmp_path: Path) -> Flask:
+    add_user(in_memory_db, "alice")  # otherwise the dashboard is locked until setup
     app = make_app(in_memory_db, tmp_path)
 
     @app.route("/_test/token")

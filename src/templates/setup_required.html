@@ -1,0 +1,28 @@
+{% extends "auth_base.html" %}
+{% block title %}Setup required &middot; NetSentry{% endblock %}
+{% block styles %}
+  .setup { max-width: 640px; margin: 3rem auto 0; line-height: 1.55; }
+  .setup h2 { font-size: 1.1rem; margin: 0 0 0.75rem; }
+  .setup pre {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.7rem 0.9rem;
+    overflow-x: auto;
+    font-size: 0.85rem;
+  }
+{% endblock %}
+{% block content %}
+<section class="card setup">
+  <h2>Create the first admin account</h2>
+  <p>Dashboard authentication is enabled, but no user accounts exist yet, so the
+  dashboard is locked. NetSentry never ships a default account: create the first
+  admin from the command line on the machine running NetSentry.</p>
+  <p class="label">Native install</p>
+  <pre><code>python main.py --create-user YOUR_NAME --role admin</code></pre>
+  <p class="label">Docker</p>
+  <pre><code>docker compose exec netsentry python main.py --create-user YOUR_NAME --role admin</code></pre>
+  <p class="muted">You'll be asked for the password twice (it's never accepted as an
+  argument). Then reload this page to sign in.</p>
+</section>
+{% endblock %}

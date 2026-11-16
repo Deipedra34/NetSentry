@@ -120,6 +120,12 @@ def _error_response(message: str, status: int) -> Any:
 
 GENERIC_LOGIN_ERROR = "Invalid username or password."
 LOCKED_OUT_ERROR = "Too many failed sign-in attempts. Please try again later."
+NO_USERS_MESSAGE = (
+    "Dashboard authentication is enabled but no user accounts exist, so the dashboard "
+    "refuses all requests. Create the first admin from the CLI: "
+    "python main.py --create-user NAME --role admin "
+    "(Docker: docker compose exec netsentry python main.py --create-user NAME --role admin)"
+)
 
 
 def _init_auth(
@@ -135,6 +141,17 @@ def _init_auth(
     app.config["NETSENTRY_LOGIN_LIMITER"] = limiter
     lifetime_seconds = auth_config.session_lifetime_minutes * 60
     idle_seconds = auth_config.idle_timeout_minutes * 60
+
+    if database.count_users() == 0:
+        logger.warning(NO_USERS_MESSAGE)
+
+    @app.before_request
+    def _require_first_admin() -> Any:
+        # checked per request, so the dashboard unlocks as soon as the
+        # first account is created from the CLI -- no restart needed
+        if request.endpoint != "healthz" and database.count_users() == 0:
+            return render_template("setup_required.html"), 503
+        return None
 
     @app.before_request
     def _check_csrf() -> Any:
