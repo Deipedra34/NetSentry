@@ -16,12 +16,12 @@ import secrets
 import threading
 import time
 from collections import OrderedDict
-from functools import lru_cache
+from functools import lru_cache, wraps
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
-from urllib.parse import urlsplit
+from typing import Any, Callable, List, Optional, Tuple, TypeVar, cast
+from urllib.parse import urlencode, urlsplit
 
-from flask import request, session
+from flask import Response, current_app, g, jsonify, redirect, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from src.database import Database, User
@@ -414,3 +414,66 @@ def load_session_user(
         return None
     session[SESSION_LAST_SEEN] = now
     return user
+
+
+ViewFunc = TypeVar("ViewFunc", bound=Callable[..., Any])
+
+
+def _auth_enabled() -> bool:
+    return bool(current_app.config.get("NETSENTRY_AUTH_ENABLED"))
+
+
+def _wants_json() -> bool:
+    return request.path.startswith("/api/")
+
+
+def _unauthenticated() -> Any:
+    """401 with a JSON error for API calls; a redirect to the login page
+    (coming back here afterwards) for pages."""
+    if _wants_json():
+        return jsonify({"error": "authentication required"}), 401
+    target = request.full_path if request.query_string else request.path
+    return redirect("/login?" + urlencode({"next": target}))
+
+
+def _forbidden() -> Any:
+    if _wants_json():
+        return jsonify({"error": "admin role required"}), 403
+    return Response("Forbidden: this page requires the admin role.", 403, mimetype="text/plain")
+
+
+def login_required(view: ViewFunc) -> ViewFunc:
+    """Lets a view run only for a signed-in user (any role) when auth is
+    enabled; otherwise API calls get a 401 and pages redirect to /login.
+    With auth disabled it does nothing, so the dashboard behaves exactly as
+    it did before (legacy Basic Auth, if configured, still applies)."""
+
+    @wraps(view)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if _auth_enabled() and g.get("current_user") is None:
+            return _unauthenticated()
+        return view(*args, **kwargs)
+
+    return cast(ViewFunc, wrapper)
+
+
+def admin_required(view: ViewFunc) -> ViewFunc:
+    """Like login_required, but the user must also have the admin role --
+    viewers get a 403. One line on any view that changes something, e.g.:
+
+        @app.route("/api/unblock", methods=["POST"])
+        @admin_required
+        def api_unblock(): ...
+    """
+
+    @wraps(view)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if _auth_enabled():
+            user = g.get("current_user")
+            if user is None:
+                return _unauthenticated()
+            if user.role != ROLE_ADMIN:
+                return _forbidden()
+        return view(*args, **kwargs)
+
+    return cast(ViewFunc, wrapper)
