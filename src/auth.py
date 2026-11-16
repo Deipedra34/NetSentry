@@ -20,6 +20,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
+from flask import request, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from src.database import Database, User
@@ -38,6 +39,13 @@ MAX_PASSWORD_LENGTH = 1024
 # bytes of randomness in a freshly generated session secret key; anything
 # shorter found on disk is refused rather than silently used
 SECRET_KEY_BYTES = 32
+
+# CSRF: one random token per session, sent back by every state-changing
+# request as a form field (HTML forms) or a header (fetch() calls)
+CSRF_SESSION_KEY = "csrf_token"
+CSRF_FORM_FIELD = "csrf_token"
+CSRF_HEADER = "X-CSRF-Token"
+STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
 class AccountError(ValueError):
@@ -304,3 +312,35 @@ def limiter_keys(username: str, client_ip: Optional[str]) -> Tuple[str, str]:
     """The LoginLimiter keys for a login attempt: the username (case-folded,
     whether or not it exists) and the client IP."""
     return f"user:{username.casefold()}", f"ip:{client_ip or 'unknown'}"
+
+
+def csrf_token() -> str:
+    """This session's CSRF token, created on first use. Templates put it in
+    a hidden csrf_token field on every form that changes something."""
+    token = session.get(CSRF_SESSION_KEY)
+    if not token:
+        token = rotate_csrf_token()
+    return token
+
+
+def rotate_csrf_token() -> str:
+    """Replaces this session's CSRF token with a fresh one (on login)."""
+    token = secrets.token_urlsafe(32)
+    session[CSRF_SESSION_KEY] = token
+    return token
+
+
+def csrf_check_needed() -> bool:
+    """True for request methods that change state and so need a token."""
+    return request.method in STATE_CHANGING_METHODS
+
+
+def csrf_token_valid() -> bool:
+    """True if the current request carries this session's CSRF token, in
+    the form field or the header. Always False when the session has no
+    token yet (e.g. a forged POST from a fresh browser)."""
+    expected = session.get(CSRF_SESSION_KEY)
+    sent = request.form.get(CSRF_FORM_FIELD) or request.headers.get(CSRF_HEADER)
+    if not expected or not sent:
+        return False
+    return secrets.compare_digest(str(sent), str(expected))

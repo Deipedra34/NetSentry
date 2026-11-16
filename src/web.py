@@ -109,6 +109,32 @@ def _init_sessions(app: Flask, auth_config: AuthConfig, tls: bool) -> None:
     )
 
 
+def _error_response(message: str, status: int) -> Any:
+    """An error in the shape the caller expects: the existing API error
+    style ({"error": ...}) for /api/ requests, a plain page otherwise."""
+    if request.path.startswith("/api/"):
+        return jsonify({"error": message}), status
+    return Response(message, status, mimetype="text/plain")
+
+
+def _init_auth(app: Flask) -> None:
+    """Request hooks and template helpers for the session login. Only
+    called when auth.enabled is on."""
+    from src.auth import csrf_check_needed, csrf_token, csrf_token_valid
+
+    @app.before_request
+    def _check_csrf() -> Any:
+        if csrf_check_needed() and not csrf_token_valid():
+            return _error_response(
+                "Missing or invalid CSRF token. Reload the page and try again.", 400
+            )
+        return None
+
+    @app.context_processor
+    def _auth_template_helpers() -> Dict[str, Any]:
+        return {"csrf_token": csrf_token}
+
+
 def create_app(
     database: Database,
     refresh_interval: int = 5,
@@ -142,6 +168,7 @@ def create_app(
     if auth_enabled:
         assert auth_config is not None
         _init_sessions(app, auth_config, tls)
+        _init_auth(app)
         if username or password:
             logger.info(
                 "auth.enabled is on, so web.username/web.password (Basic Auth) are ignored."
