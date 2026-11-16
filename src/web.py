@@ -9,14 +9,25 @@ from __future__ import annotations
 
 import datetime
 import ipaddress
+import logging
 import secrets
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from flask import Flask, Response, jsonify, render_template, request
 
-from src.config import ReportsConfig
+from src.config import AuthConfig, ReportsConfig
 from src.database import Database
+
+logger = logging.getLogger("netsentry.web")
+
+# sent with every dashboard response
+SECURITY_HEADERS: Dict[str, str] = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "same-origin",
+}
 
 # every event_type a detector can raise (the `name` of each class in
 # src/detectors.py). The distribution endpoint always reports all of these,
@@ -68,12 +79,45 @@ def _stats_window(
     return starts, bucket_seconds
 
 
+def cookie_secure_enabled(setting: Any, tls: bool) -> bool:
+    """auth.cookie_secure ("auto", "true" or "false"; YAML may also hand
+    over a real bool) -> whether session cookies get the Secure flag.
+    "auto" means: whenever the dashboard is served over TLS."""
+    value = str(setting).strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return tls
+
+
+def _init_sessions(app: Flask, auth_config: AuthConfig, tls: bool) -> None:
+    """Flask's signed session cookie, set up for dashboard logins: signed
+    with the persistent key at auth.secret_key_path, HttpOnly, SameSite=Lax,
+    Secure per auth.cookie_secure, and expiring with the session lifetime."""
+    from src.auth import load_or_create_secret_key
+
+    app.secret_key = load_or_create_secret_key(auth_config.secret_key_path)
+    app.config.update(
+        SESSION_COOKIE_NAME="netsentry_session",
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=cookie_secure_enabled(auth_config.cookie_secure, tls),
+        PERMANENT_SESSION_LIFETIME=datetime.timedelta(
+            minutes=auth_config.session_lifetime_minutes
+        ),
+    )
+
+
 def create_app(
     database: Database,
     refresh_interval: int = 5,
     username: str = "",
     password: str = "",
     reports_config: Optional[ReportsConfig] = None,
+    auth_config: Optional[AuthConfig] = None,
+    tls: bool = False,
+    clock: Callable[[], float] = time.time,
 ) -> Flask:
     """Builds the Flask app. refresh_interval just gets passed through to the
     template so the JS knows how often to poll. username/password enable
@@ -81,12 +125,30 @@ def create_app(
     just off (fine for localhost-only use, wouldn't recommend exposing this
     to the internet without at least setting these though). reports_config
     (the config's reports section) sizes the tables in /api/report's PDFs.
+
+    auth_config (the config's auth section) with `enabled: true` switches
+    to user accounts with a session login instead (see src/auth.py), and
+    Basic Auth is then ignored. tls says whether the dashboard is served
+    over https (for auth.cookie_secure: auto). clock is injectable so tests
+    can move time forward instead of sleeping.
     """
     app = Flask(__name__)
     app.config["NETSENTRY_DB"] = database
     app.config["NETSENTRY_REFRESH_INTERVAL"] = refresh_interval
 
-    auth_required = bool(username and password)
+    auth_enabled = bool(auth_config is not None and auth_config.enabled)
+    app.config["NETSENTRY_AUTH_ENABLED"] = auth_enabled
+    app.config["NETSENTRY_CLOCK"] = clock
+    if auth_enabled:
+        assert auth_config is not None
+        _init_sessions(app, auth_config, tls)
+        if username or password:
+            logger.info(
+                "auth.enabled is on, so web.username/web.password (Basic Auth) are ignored."
+            )
+
+    # legacy Basic Auth, only when the session login isn't in use
+    auth_required = bool(username and password) and not auth_enabled
 
     @app.before_request
     def _require_auth():
@@ -105,6 +167,12 @@ def create_app(
                 {"WWW-Authenticate": 'Basic realm="NetSentry"'},
             )
         return None
+
+    @app.after_request
+    def _security_headers(response: Response) -> Response:
+        for header, value in SECURITY_HEADERS.items():
+            response.headers.setdefault(header, value)
+        return response
 
     @app.route("/")
     def dashboard() -> str:

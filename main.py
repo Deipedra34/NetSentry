@@ -216,6 +216,8 @@ def run_web_dashboard(database: Database, config: Config, blocking: bool) -> Opt
         username=config.web.username,
         password=config.web.password,
         reports_config=config.reports,
+        auth_config=config.auth,
+        tls=config.web.https,
     )
 
     ssl_context = None
