@@ -543,6 +543,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     Path(config.database.path).parent.mkdir(parents=True, exist_ok=True)
     database = Database(config.database.path)
 
+    from src.block_management import prune_block_records
+
+    prune_block_records(database, config.block_management.audit_keep_days)
+
     if args.report:
         try:
             return run_report(args, config, database)

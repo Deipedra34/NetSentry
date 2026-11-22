@@ -109,6 +109,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     database = Database(config.database.path)
 
+    from src.block_management import prune_block_records
+
+    prune_block_records(database, config.block_management.audit_keep_days)
+
     sniffer: Optional[NetworkSniffer] = None
     if not args.web_only:
         try:

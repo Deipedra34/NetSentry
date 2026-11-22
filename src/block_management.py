@@ -597,3 +597,23 @@ class BlockManager:
         except BlockRefused as exc:
             raise self._refuse(actor, "unblock", target, exc)
         return self.unblock(blocked.id, actor)  # type: ignore[arg-type]
+
+
+def prune_block_records(
+    database: Database, keep_days: int, now: Optional[datetime] = None
+) -> Tuple[int, int]:
+    """Deletes audit log entries and block history older than keep_days
+    (block_management.audit_keep_days) -- run once at startup. keep_days of
+    0 or less keeps everything. Returns (audit entries, history entries)
+    deleted."""
+    if keep_days <= 0:
+        return 0, 0
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=keep_days)
+    audit = database.prune_audit_entries(cutoff)
+    history = database.prune_block_history(cutoff)
+    if audit or history:
+        logger.info(
+            "Pruned %d audit log and %d block history entries older than %d days",
+            audit, history, keep_days,
+        )
+    return audit, history
