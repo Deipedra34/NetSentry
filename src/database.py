@@ -876,7 +876,34 @@ class Database:
     ) -> BlockHistoryEntry:
         """Records that `blocked` was lifted (call it when the blocked_ips row
         is removed) and returns the history entry."""
-        entry = BlockHistoryEntry(
+        entry = self._history_entry(blocked, outcome, removed_by, removed_at)
+        with self._lock:
+            self._insert_history(entry)
+            self._conn.commit()
+        return entry
+
+    def move_block_to_history(
+        self,
+        blocked: BlockedIP,
+        outcome: str,
+        removed_by: str,
+        removed_at: Optional[datetime] = None,
+    ) -> BlockHistoryEntry:
+        """Lifts a block in the database: deletes its blocked_ips row and
+        records it in block_history, in one transaction -- a crash in
+        between can't lose the record or leave it in both tables."""
+        entry = self._history_entry(blocked, outcome, removed_by, removed_at)
+        with self._lock:
+            self._conn.execute("DELETE FROM blocked_ips WHERE id = ?", (blocked.id,))
+            self._insert_history(entry)
+            self._conn.commit()
+        return entry
+
+    @staticmethod
+    def _history_entry(
+        blocked: BlockedIP, outcome: str, removed_by: str, removed_at: Optional[datetime]
+    ) -> BlockHistoryEntry:
+        return BlockHistoryEntry(
             source_ip=blocked.source_ip,
             source=blocked.source,
             event_type=blocked.event_type,
@@ -889,28 +916,29 @@ class Database:
             removed_by=removed_by,
             dry_run=blocked.dry_run,
         )
-        with self._lock:
-            cursor = self._conn.execute(
-                "INSERT INTO block_history (source_ip, source, event_type, reason, created_by, "
-                "blocked_at, expires_at, removed_at, outcome, removed_by, dry_run) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    entry.source_ip,
-                    entry.source,
-                    entry.event_type,
-                    entry.reason,
-                    entry.created_by,
-                    entry.blocked_at.isoformat(),
-                    entry.expires_at.isoformat() if entry.expires_at else None,
-                    entry.removed_at.isoformat(),
-                    entry.outcome,
-                    entry.removed_by,
-                    1 if entry.dry_run else 0,
-                ),
-            )
-            self._conn.commit()
-            entry.id = cursor.lastrowid
-        return entry
+
+    def _insert_history(self, entry: BlockHistoryEntry) -> None:
+        """Writes entry to block_history and sets its id. Called with the
+        lock held; the caller commits."""
+        cursor = self._conn.execute(
+            "INSERT INTO block_history (source_ip, source, event_type, reason, created_by, "
+            "blocked_at, expires_at, removed_at, outcome, removed_by, dry_run) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                entry.source_ip,
+                entry.source,
+                entry.event_type,
+                entry.reason,
+                entry.created_by,
+                entry.blocked_at.isoformat(),
+                entry.expires_at.isoformat() if entry.expires_at else None,
+                entry.removed_at.isoformat(),
+                entry.outcome,
+                entry.removed_by,
+                1 if entry.dry_run else 0,
+            ),
+        )
+        entry.id = cursor.lastrowid
 
     def get_block_history(self, limit: int = 50, offset: int = 0) -> List[BlockHistoryEntry]:
         """Lifted blocks, most recently lifted first; limit/offset page."""

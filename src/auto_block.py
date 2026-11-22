@@ -255,6 +255,12 @@ class AutoBlocker:
             self._remove_block(blocked)
 
     def _remove_block(self, blocked: BlockedIP) -> None:
+        if blocked.dry_run:
+            # recorded while dry_run was on (a manual block): its rule was
+            # never applied, so there's nothing to remove at the firewall
+            self.database.move_block_to_history(blocked, "expired", "auto")
+            logger.info("Expired dry-run block on %s removed (it was never applied)", blocked.source_ip)
+            return
         try:
             command = build_unblock_command(blocked.source_ip, blocked.rule_identifier)
         except ValueError as exc:
@@ -274,13 +280,13 @@ class AutoBlocker:
                 "auto_block.dry_run is enabled -- NOT removing firewall block for %s "
                 "(would have run: %s)", blocked.source_ip, " ".join(command),
             )
-            self.database.remove_blocked_ip(blocked.id)
+            self.database.move_block_to_history(blocked, "expired", "auto")
             return
 
         if not self._run_command(command):
             return
 
-        self.database.remove_blocked_ip(blocked.id)
+        self.database.move_block_to_history(blocked, "expired", "auto")
         logger.info("Unblocked expired source IP %s", blocked.source_ip)
 
     @staticmethod
