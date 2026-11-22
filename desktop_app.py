@@ -131,10 +131,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             threading.Thread(target=_capture, name="netsentry-capture", daemon=True).start()
 
+    from src.block_management import BlockManager
     from src.web import create_app
 
-    # loopback-only and loaded by this process's own window: no login
-    app = create_app(database, refresh_interval=config.web.refresh_interval, disable_auth=True)
+    # loopback-only and loaded by this process's own window: no login, and
+    # block management works because the dashboard only listens locally
+    app = create_app(
+        database,
+        refresh_interval=config.web.refresh_interval,
+        disable_auth=True,
+        block_manager=BlockManager(config, database),
+        bind_host="127.0.0.1",
+    )
     port = _find_free_port(config.web.port)
 
     threading.Thread(

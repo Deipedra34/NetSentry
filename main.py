@@ -34,7 +34,6 @@ Note you'll need root/admin rights for real packet capture (scapy needs it).
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import logging
 import sys
 import threading
@@ -319,13 +318,11 @@ def run_report(args: argparse.Namespace, config: Config, database: Database) -> 
 
 def _is_loopback_host(host: str) -> bool:
     """True if binding the dashboard to host only exposes it to this
-    machine (127.0.0.1, ::1, localhost) -- not 0.0.0.0, a LAN address etc."""
-    if host.strip().lower() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host.strip("[]")).is_loopback
-    except ValueError:
-        return False
+    machine (127.0.0.1, ::1, localhost) -- not 0.0.0.0, a LAN address etc.
+    The same check the dashboard uses for its block management rules."""
+    from src.web import is_loopback_host
+
+    return is_loopback_host(host)
 
 
 def dashboard_security_warnings(config: Config) -> List[str]:
@@ -362,6 +359,7 @@ def run_web_dashboard(database: Database, config: Config, blocking: bool) -> Opt
     returns right away, which is what we want when the sniffer also needs the
     main thread.
     """
+    from src.block_management import BlockManager
     from src.web import create_app
 
     for warning in dashboard_security_warnings(config):
@@ -375,6 +373,8 @@ def run_web_dashboard(database: Database, config: Config, blocking: bool) -> Opt
         reports_config=config.reports,
         auth_config=config.auth,
         tls=config.web.https,
+        block_manager=BlockManager(config, database),
+        bind_host=config.web.host,
     )
 
     ssl_context = None
