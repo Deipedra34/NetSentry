@@ -143,6 +143,38 @@ class User:
         }
 
 
+@dataclass
+class AuditEntry:
+    """One block management audit log entry (see src/block_management.py):
+    who did what to which IP or range, and how it went. action is "block",
+    "unblock" or "change_duration"; result is "success", "dry_run",
+    "refused" (a safety or validation rule said no -- details names it) or
+    "failed" (the firewall command failed). actor is a dashboard username,
+    "local" (the desktop app / auth-less localhost dashboard) or "cli".
+    Entries are append-only: nothing updates or deletes one, apart from
+    pruning entries older than block_management.audit_keep_days."""
+
+    actor: str
+    action: str
+    target: str
+    result: str
+    details: str = ""
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    id: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """for jsonify() basically, converts to plain dict"""
+        return {
+            "id": self.id,
+            "timestamp": self.timestamp.isoformat(),
+            "actor": self.actor,
+            "action": self.action,
+            "target": self.target,
+            "details": self.details,
+            "result": self.result,
+        }
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -193,6 +225,18 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at TEXT,
     disabled INTEGER NOT NULL DEFAULT 0
 );
+
+-- block management audit log (src/block_management.py), append-only
+CREATE TABLE IF NOT EXISTS block_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '',
+    result TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_block_audit_timestamp ON block_audit (timestamp);
 """
 
 _USER_COLUMNS = "id, username, password_hash, role, created_at, last_login_at, disabled"
@@ -243,6 +287,31 @@ def _row_to_threat_intel(row: sqlite3.Row) -> ThreatIntelResult:
         virustotal_total_engines=row["virustotal_total_engines"],
         raw_response_summary=row["raw_response_summary"],
     )
+
+
+def _row_to_audit_entry(row: sqlite3.Row) -> AuditEntry:
+    return AuditEntry(
+        id=row["id"],
+        timestamp=datetime.fromisoformat(row["timestamp"]),
+        actor=row["actor"],
+        action=row["action"],
+        target=row["target"],
+        details=row["details"],
+        result=row["result"],
+    )
+
+
+def _audit_filter(action: Optional[str], actor: Optional[str]) -> Tuple[str, List[Any]]:
+    """WHERE clause (possibly empty) and params for the audit log filters."""
+    clauses: List[str] = []
+    params: List[Any] = []
+    if action:
+        clauses.append("action = ?")
+        params.append(action)
+    if actor:
+        clauses.append("actor = ?")
+        params.append(actor)
+    return (" WHERE " + " AND ".join(clauses) if clauses else ""), params
 
 
 def _row_to_user(row: sqlite3.Row) -> User:
@@ -725,6 +794,68 @@ class Database:
             cursor = self._conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
             self._conn.commit()
         return cursor.rowcount > 0
+
+    def add_audit_entry(self, entry: AuditEntry) -> AuditEntry:
+        """Appends an audit log entry, sets its id and hands it back."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO block_audit (timestamp, actor, action, target, details, result) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    entry.timestamp.isoformat(),
+                    entry.actor,
+                    entry.action,
+                    entry.target,
+                    entry.details,
+                    entry.result,
+                ),
+            )
+            self._conn.commit()
+            entry.id = cursor.lastrowid
+        return entry
+
+    def get_audit_entries(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        action: Optional[str] = None,
+        actor: Optional[str] = None,
+    ) -> List[AuditEntry]:
+        """Audit log entries newest first, optionally only one action and/or
+        one actor; limit/offset page through them."""
+        where, params = _audit_filter(action, actor)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, timestamp, actor, action, target, details, result FROM block_audit"
+                f"{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+        return [_row_to_audit_entry(row) for row in rows]
+
+    def count_audit_entries(self, action: Optional[str] = None, actor: Optional[str] = None) -> int:
+        """How many audit log entries match the same filters."""
+        where, params = _audit_filter(action, actor)
+        with self._lock:
+            row = self._conn.execute(f"SELECT COUNT(*) AS c FROM block_audit{where}", params).fetchone()
+        return int(row["c"])
+
+    def list_audit_actors(self) -> List[str]:
+        """Every actor that appears in the audit log, for the filter list."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT actor FROM block_audit ORDER BY actor COLLATE NOCASE"
+            ).fetchall()
+        return [row["actor"] for row in rows]
+
+    def prune_audit_entries(self, before: datetime) -> int:
+        """Deletes audit log entries older than `before`; returns how many.
+        The only way an entry is ever removed."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM block_audit WHERE timestamp < ?", (before.isoformat(),)
+            )
+            self._conn.commit()
+        return cursor.rowcount
 
     def close(self) -> None:
         """closes the connection, call this when you're done with it"""
