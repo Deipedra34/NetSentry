@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import ipaddress
 import logging
+import math
 import secrets
 import time
 from pathlib import Path
@@ -18,7 +19,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from flask import Flask, Response, flash, g, jsonify, redirect, render_template, request
 
 from src.auth import login_required
-from src.config import AuthConfig, ReportsConfig
+from src.block_management import BlockManager
+from src.config import AuthConfig, Config, ReportsConfig
 from src.database import Database
 
 logger = logging.getLogger("netsentry.web")
@@ -335,6 +337,65 @@ def _init_user_management(app: Flask, database: Database, auth_config: AuthConfi
         return _run(action)
 
 
+# page size limits for the block history and audit log endpoints
+DEFAULT_PAGE_SIZE = 25
+MAX_PAGE_SIZE = 100
+AUDIT_ACTIONS: Tuple[str, ...] = ("block", "unblock", "change_duration")
+
+
+def _page_args() -> Tuple[int, int]:
+    """(page, per_page) from ?page= (1-based) and ?per_page=, clamped."""
+    page = max(1, request.args.get("page", default=1, type=int) or 1)
+    per_page = request.args.get("per_page", default=DEFAULT_PAGE_SIZE, type=int) or DEFAULT_PAGE_SIZE
+    return page, min(max(1, per_page), MAX_PAGE_SIZE)
+
+
+def _paged(entries: List[Dict[str, Any]], total: int, page: int, per_page: int) -> Dict[str, Any]:
+    return {
+        "entries": entries,
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "pages": max(1, math.ceil(total / per_page)),
+    }
+
+
+def _init_block_management(app: Flask, database: Database, manager: BlockManager) -> None:
+    """The Blocked IPs management endpoints: block history and the audit
+    log (read by both roles). Only called when block_management.enabled
+    is on; the active blocks list is /api/blocked_ips, which always
+    exists."""
+
+    @app.route("/api/blocks/history")
+    @login_required
+    def api_block_history() -> Any:
+        """Lifted blocks (expired or removed), most recently lifted first,
+        paginated with ?page= and ?per_page=."""
+        page, per_page = _page_args()
+        entries = database.get_block_history(limit=per_page, offset=(page - 1) * per_page)
+        return jsonify(_paged([e.to_dict() for e in entries], database.count_block_history(), page, per_page))
+
+    @app.route("/api/blocks/audit")
+    @login_required
+    def api_block_audit() -> Any:
+        """The block management audit log, newest first, paginated with
+        ?page= and ?per_page=, optionally filtered by ?action= and ?user=.
+        Read-only: nothing can change or delete an entry through the API.
+        Also lists the known actions and users, for the filter menus."""
+        page, per_page = _page_args()
+        action = request.args.get("action") or None
+        actor = request.args.get("user") or None
+        entries = database.get_audit_entries(
+            limit=per_page, offset=(page - 1) * per_page, action=action, actor=actor
+        )
+        payload = _paged(
+            [e.to_dict() for e in entries], database.count_audit_entries(action, actor), page, per_page
+        )
+        payload["actions"] = list(AUDIT_ACTIONS)
+        payload["users"] = database.list_audit_actors()
+        return jsonify(payload)
+
+
 def create_app(
     database: Database,
     refresh_interval: int = 5,
@@ -345,6 +406,8 @@ def create_app(
     tls: bool = False,
     clock: Callable[[], float] = time.time,
     disable_auth: bool = False,
+    block_manager: Optional[BlockManager] = None,
+    bind_host: Optional[str] = None,
 ) -> Flask:
     """Builds the Flask app. refresh_interval just gets passed through to the
     template so the JS knows how often to poll. username/password enable
@@ -362,6 +425,11 @@ def create_app(
     disable_auth=True turns every kind of login off, whatever the other
     arguments say -- for desktop_app.py, which serves the dashboard on a
     loopback-only port to its own native window.
+
+    block_manager does the manual blocking behind the Blocked IPs page (one
+    with default, dry-run settings is made if none is given), and bind_host
+    is the address the dashboard listens on (web.host) -- see README.md
+    "Managing Blocked IPs" for why that matters when auth is off.
     """
     app = Flask(__name__)
     app.config["NETSENTRY_DB"] = database
@@ -375,6 +443,9 @@ def create_app(
         _init_sessions(app, auth_config, tls)
         _init_auth(app, database, auth_config, clock)
         _init_user_management(app, database, auth_config)
+    block_manager = block_manager or BlockManager(Config(), database)
+    if block_manager.settings.enabled:
+        _init_block_management(app, database, block_manager)
         if username or password:
             logger.info(
                 "auth.enabled is on, so web.username/web.password (Basic Auth) are ignored."
@@ -538,9 +609,9 @@ def create_app(
     @app.route("/api/blocked_ips")
     @login_required
     def api_blocked_ips() -> Any:
-        """JSON list of currently-blocked IPs (see AutoBlocker in
-        src/auto_block.py), newest first. Read-only -- blocks/unblocks
-        happen from the detection engine, not the dashboard."""
+        """JSON list of currently-blocked IPs and ranges, automatic (see
+        AutoBlocker in src/auto_block.py) and manual (the Blocked IPs page),
+        newest first, with their source, creator, reason and dry-run flag."""
         blocked = database.get_blocked_ips()
         return jsonify([b.to_dict() for b in blocked])
 
