@@ -38,6 +38,10 @@ services:
     # own access to this machine. Only switch to --auto-block-live
     # deliberately, after reading README.md "Automatic Blocking" (note the
     # image doesn't ship iptables, so live mode would also need it added).
+    # The same goes for MANUAL blocks from the dashboard's Blocked IPs page
+    # or `--block`: they share this dry-run switch, and in live mode they
+    # change the HOST firewall too, because the container uses host
+    # networking. See README.md "Managing Blocked IPs".
     # ##########################################################################
     command:
       - sh
