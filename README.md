@@ -164,12 +164,14 @@ netsentry/
 │   │   ├── generator.py          # Collect, render and write a report
 │   │   └── scheduler.py          # Scheduled daily/weekly reports + rotation
 │   ├── auth.py                   # Dashboard accounts: hashing, sessions, CSRF, roles
+│   ├── block_management.py       # Manual block/unblock, safety rules, audit log
 │   ├── web.py                    # Flask app, JSON API, login, self-signed TLS setup
 │   └── templates/
 │       ├── dashboard.html
 │       ├── auth_base.html         # Shared layout for the pages below
 │       ├── login.html
 │       ├── admin_users.html       # Admin-only user management
+│       ├── blocks.html            # Blocked IPs management (active, history, audit log)
 │       └── setup_required.html    # Shown until the first admin exists
 ├── data/
 │   ├── ja3_blocklist.txt         # User-supplied JA3 threat intel (empty by default)
@@ -217,7 +219,15 @@ netsentry/
     ├── test_web_access.py
     ├── test_web_admin.py
     ├── test_user_cli.py
-    └── test_startup_warnings.py
+    ├── test_startup_warnings.py
+    ├── test_block_db.py
+    ├── test_block_validation.py
+    ├── test_block_safety.py
+    ├── test_block_manager.py
+    ├── test_web_blocks.py
+    ├── test_web_blocks_page.py
+    ├── test_block_cli.py
+    └── test_block_restart.py
 ```
 
 ---
@@ -573,6 +583,10 @@ python main.py --help
 --list-users            List dashboard accounts
 --set-role USERNAME ROLE, --disable-user / --enable-user / --delete-user USERNAME
                         Manage dashboard accounts (see "Dashboard Authentication")
+--block IP              Block an IP or CIDR range and exit (with --duration MINUTES, --reason TEXT)
+--unblock IP            Lift the block on an IP or CIDR range
+--list-blocks           List the active blocks
+--audit-log             Show the block management audit log (with --limit N, default 50)
 ```
 
 ### Dashboard preview
@@ -719,8 +733,8 @@ existing SQLite database, and are never logged.
 
 | Role | Can do |
 |---|---|
-| `admin` | Everything a viewer can, plus user management at `/admin/users`: create users, reset passwords, change roles, disable/enable and delete accounts |
-| `viewer` | Read-only: the dashboard, charts, events, blocked IPs and PDF report downloads |
+| `admin` | Everything a viewer can, plus user management at `/admin/users` (create users, reset passwords, change roles, disable/enable and delete accounts) and manual blocking at `/blocks` (block, unblock, change durations; see [Managing Blocked IPs](#managing-blocked-ips)) |
+| `viewer` | Read-only: the dashboard, charts, events, blocked IPs (including the block history and audit log) and PDF report downloads |
 
 A viewer who opens an admin page gets `403 Forbidden`. To keep someone able
 to manage users, NetSentry refuses (in the CLI and on the dashboard) to
@@ -1024,13 +1038,18 @@ auto_block:
 
 The dashboard's **Blocked IPs** table (below the events table) shows every
 currently-blocked IP, the event type that triggered it, and when it was
-blocked/expires — read-only, sourced from `/api/blocked_ips`.
+blocked/expires, sourced from `/api/blocked_ips`. Its **Manage blocked IPs**
+link opens the full management page, where an admin can also unblock an
+automatic block early or change how long it lasts, and where lifted blocks
+are kept in a history (see [Managing Blocked IPs](#managing-blocked-ips)).
+On Linux, IPv6 addresses are blocked with `ip6tables` (`iptables` only
+handles IPv4).
 
 **If something goes wrong** — a block you didn't want, or you just want to
 clear everything out:
 
-1. Check what's currently tracked: open the dashboard's Blocked IPs table,
-   or query the database directly —
+1. Check what's currently tracked: open the Blocked IPs page (or
+   `python main.py --list-blocks`), or query the database directly —
    `sqlite3 netsentry.db "SELECT * FROM blocked_ips;"`.
 2. Remove the firewall rule manually:
    - **Windows:** `netsh advfirewall firewall delete rule name=NetSentry_Block_<ip>`
@@ -1039,6 +1058,193 @@ clear everything out:
    `sqlite3 netsentry.db "DELETE FROM blocked_ips WHERE source_ip = '<ip>';"`.
 4. To stop auto-blocking entirely, set `auto_block.enabled: false` (or pass
    `--auto-block-dry-run`) and restart.
+
+---
+
+## Managing Blocked IPs
+
+Besides automatic blocking, NetSentry lets an admin block and unblock IPs
+and CIDR ranges by hand, extend or shorten a block, and look back at every
+block and every action taken. It all goes through `BlockManager` in
+`src/block_management.py`, from the dashboard or the command line, and it
+uses **the same firewall commands and the same `auto_block.dry_run` switch
+as automatic blocking**: one shared code path, so a manual block behaves
+exactly like an automatic one. It works whether or not `auto_block.enabled`
+is on.
+
+### The Blocked IPs page
+
+Open it from the **Manage blocked IPs** link under the dashboard's Blocked
+IPs table, or go to `/blocks`. It has three tabs:
+
+- **Active**: every active block, automatic or manual. Each row shows the IP
+  or range, whether it's `auto` or `manual` (and *dry run (not applied)* if
+  it was only recorded), the event type that triggered it or the reason
+  given, when it was blocked, when it expires (with a live countdown), and
+  who created it. Admins also get **Unblock** and **Extend** buttons, and
+  can select several rows to unblock them at once.
+- **History**: blocks that have ended, with how they ended (`expired` or
+  `unblocked`), when, and by whom. Paginated, most recent first.
+- **Audit log**: every action, newest first, filterable by action and user
+  (see [The audit log](#the-audit-log)).
+
+Admins see a block form above the tabs: an IP address or CIDR range, a
+duration (15 minutes, 1 hour, 24 hours, 7 days, a custom number of minutes,
+or permanent if allowed) and an optional reason. The form gives hints, but
+the server checks everything again: the browser is never trusted.
+
+A banner at the top always says which mode is active:
+
+- **Dry run** (`auto_block.dry_run: true`, the default): blocks are recorded
+  and listed as *dry run (not applied)*, but nothing touches the firewall.
+  The log shows the exact command that would have run.
+- **Live mode: changes affect the host firewall.** Blocking and unblocking
+  run real `netsh` / `iptables` commands on this machine.
+
+### Blocking, unblocking and changing durations
+
+- **Block**: a single IP (the default) or a CIDR range of at most /16
+  (IPv4) or /48 (IPv6). The duration is in minutes; `0` means permanent and
+  is only allowed with `allow_permanent: true`, and other durations may be
+  at most `max_duration_minutes`. Blocking something that's already blocked
+  updates the existing entry (its expiry and reason) instead of adding a
+  second firewall rule. Taking over an automatic block this way turns it
+  into a manual one. A dry-run entry blocked again in live mode gets its
+  rule applied then. At most `max_manual_blocks` manual blocks can be
+  active at once, so the firewall's rule table can't be flooded.
+- **Unblock**: works on any entry, automatic or manual, after a
+  confirmation step. The firewall rule is removed through the rule
+  identifier stored with the block (`NetSentry_Block_<ip>` on Windows; on
+  Linux the matching `iptables -D` / `ip6tables -D`). If the firewall
+  command fails, the entry stays listed, the error is shown, and a warning
+  is logged: a record is never dropped while its rule may still be in
+  place. In dry run, the entry is removed from the list but the firewall is
+  not touched, exactly like the automatic expiry check in dry run.
+- **Change duration (Extend)**: sets how long an active block (automatic or
+  manual) lasts, **counted from now, not from when the block started**:
+  60 minutes means "lift it an hour from now", however long it has already
+  been in place. That works for extending and shortening alike; `0` makes
+  it permanent (if allowed). Only NetSentry's own expiry changes; the
+  firewall rule stays until the expiry check lifts it.
+
+Expired blocks, automatic and manual, are lifted by the existing expiry
+check, which the capture engine runs about once a minute, and they move to
+the history. While NetSentry runs without capture (`--web-only`, or the
+desktop app), expired blocks stay in place until capture runs again; the
+page shows them as expired. Everything survives a restart: manual blocks
+live in the same `blocked_ips` table as automatic ones, marked by `source`
+(`auto` or `manual`) together with `created_by` and `reason`. Databases from
+older versions get these columns added automatically on first start.
+
+### What can never be blocked
+
+These rules are hard-coded, not configurable. A refused attempt names the
+rule that applied, and is recorded in the audit log.
+
+| Rule | Never blocked | Why |
+|---|---|---|
+| `loopback` | `127.0.0.0/8`, `::1` | This machine talking to itself |
+| `private` | RFC 1918 (`10/8`, `172.16/12`, `192.168/16`), shared address space (`100.64/10`), IPv6 unique local (`fc00::/7`) | Your own network: blocking it cuts off your own devices |
+| `link-local` | `169.254.0.0/16`, `fe80::/10` | Used by the local network itself (address autoconfiguration, neighbour discovery) |
+| `multicast` | `224.0.0.0/4`, `ff00::/8` | Not a single host; local discovery protocols depend on it |
+| `unspecified` / `broadcast` | `0.0.0.0/8`, `::`, `255.255.255.255` | Not real sources |
+| `ipv4_mapped` | `::ffff:0:0/96` | Block the IPv4 address itself instead |
+| `non_public` | Any other reserved or documentation range | Not a routable internet address |
+| `whitelist` | Anything on the global `whitelist` | You said to trust it |
+| `own_address` | This machine's own interface addresses | You'd cut off the machine NetSentry runs on |
+| `gateway` | The default gateway, when it can be determined | You'd cut off the whole network's way out |
+| `requester` | The address of whoever is making the request | An admin must not lock themselves out of the dashboard |
+
+A CIDR range is refused if it **contains or overlaps** anything above, so a
+range can't sneak a protected address in. Every input is validated strictly
+with Python's `ipaddress` module before anything else happens: anything
+that isn't exactly one valid address or range is rejected, and firewall
+commands are built only from the normalized address (`ipaddress`'s own
+output) and run as an argument list (never through a shell), so input like
+`1.2.3.4; reboot` can never reach a command line. The reason is limited to
+200 characters of plain text, with control characters removed. It is never
+part of a command, and it's always displayed escaped.
+
+### Who can change blocks
+
+- **With dashboard authentication on** (`auth.enabled: true`): everyone
+  signed in can see the active blocks, the history and the audit log;
+  blocking, unblocking and changing durations need the **admin** role (a
+  viewer gets `403`). Every change is a CSRF-protected request.
+- **With authentication off**, the dashboard has no accounts, so it can't
+  tell an admin from anyone else. **NetSentry therefore refuses anonymous
+  firewall changes from the network**: the page stays read-only and every
+  write is refused, unless the dashboard only listens on localhost
+  (`web.host: 127.0.0.1`) *and* the request really comes from this machine.
+  That's the desktop app's case, which always listens on `127.0.0.1` and
+  can manage blocks without a login (recorded as `local`). Even then, each
+  change must carry a token only the dashboard's own page knows, so a
+  malicious website open in the same browser can't trigger one. To manage
+  blocks from another machine, turn on `auth.enabled` and sign in as an
+  admin.
+
+### The audit log
+
+Every block, unblock and duration change, and **every refused attempt**
+(with the rule that refused it), is recorded with the time, who did it (a
+username, `local` for the desktop app or auth-less localhost dashboard,
+`cli` for the command line), the action, the target, the details, and the
+result: `success`, `dry_run`, `refused` or `failed`. Entries are
+append-only: nothing in the dashboard or API can change or delete one.
+Audit entries and block history older than `audit_keep_days` are pruned
+when NetSentry starts.
+
+### From the command line
+
+The same rules and audit log apply on the command line. These commands
+never start packet capture:
+
+```bash
+python main.py --block 45.33.12.7 --duration 60 --reason "SSH brute force"
+python main.py --block 45.33.12.0/24 --duration 0      # permanent
+python main.py --unblock 45.33.12.7
+python main.py --list-blocks
+python main.py --audit-log --limit 20
+```
+
+`--duration` defaults to `default_duration_minutes`. They follow
+`auto_block.dry_run`, and `--auto-block-live` / `--auto-block-dry-run`
+override it for one command. **With dry run off, the CLI needs the same
+privileges as the firewall commands**: root on Linux, an Administrator
+terminal on Windows. In Docker, run them with
+`docker compose exec netsentry python main.py --block ...`. Remember the
+container uses host networking, so live blocks change the **host's**
+firewall.
+
+### Settings
+
+Under `block_management` in `config.yaml`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | The Blocked IPs page and its endpoints. When off, the dashboard keeps its read-only Blocked IPs table. |
+| `default_duration_minutes` | `60` | Duration of a manual block when none is given (`0` = permanent). |
+| `max_duration_minutes` | `10080` | Longest non-permanent manual block (7 days). |
+| `allow_permanent` | `true` | Allow manual blocks that never expire. |
+| `max_manual_blocks` | `500` | Most active manual blocks at once. |
+| `audit_keep_days` | `365` | Audit log and block history entries older than this are deleted at startup (`0` keeps everything). |
+
+### Clearing a stuck block
+
+If a firewall command failed (no privileges, the tool is missing, the rule
+was already removed by hand...), the block stays listed so nothing is lost
+silently. To clean it up by hand:
+
+1. Look up the entry: `python main.py --list-blocks`, or
+   `sqlite3 netsentry.db "SELECT id, source_ip, rule_identifier, source FROM blocked_ips;"`.
+2. Remove the firewall rule with the platform's tool, using the stored rule
+   identifier:
+   - **Windows** (Administrator): `netsh advfirewall firewall delete rule name=NetSentry_Block_<ip>`
+   - **Linux** (root): `iptables -D INPUT -s <ip> -j DROP` (`ip6tables` for IPv6)
+3. Then unblock it again from the page or with `--unblock` (with the rule
+   already gone, set `--auto-block-dry-run` so the entry is just removed),
+   or delete the row:
+   `sqlite3 netsentry.db "DELETE FROM blocked_ips WHERE id = <id>;"`.
 
 ---
 
