@@ -186,3 +186,40 @@ auth:
 def test_shipped_config_auth_section_matches_defaults() -> None:
     shipped = load_config(Path(__file__).resolve().parent.parent / "config.yaml").auth
     assert shipped == load_config(None).auth
+
+
+def test_block_management_defaults() -> None:
+    settings = load_config(None).block_management
+    assert settings.enabled is True
+    assert settings.default_duration_minutes == 60
+    assert settings.max_duration_minutes == 10080
+    assert settings.allow_permanent is True
+    assert settings.max_manual_blocks == 500
+    assert settings.audit_keep_days == 365
+
+
+def test_block_management_overrides_from_yaml(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+block_management:
+  enabled: false
+  default_duration_minutes: 30
+  allow_permanent: false
+  max_manual_blocks: 25
+""",
+        encoding="utf-8",
+    )
+    settings = load_config(config_file).block_management
+    assert settings.enabled is False
+    assert settings.default_duration_minutes == 30
+    assert settings.allow_permanent is False
+    assert settings.max_manual_blocks == 25
+    # untouched keys keep their defaults
+    assert settings.max_duration_minutes == 10080
+    assert settings.audit_keep_days == 365
+
+
+def test_shipped_config_block_management_section_matches_defaults() -> None:
+    shipped = load_config(Path(__file__).resolve().parent.parent / "config.yaml").block_management
+    assert shipped == load_config(None).block_management
