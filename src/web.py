@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 from flask import Flask, Response, flash, g, jsonify, redirect, render_template, request
 
-from src.auth import CSRF_HEADER, ROLE_ADMIN, admin_required, login_required
+from src.auth import CSRF_HEADER, ROLE_ADMIN, admin_required, csrf_token, login_required
 from src.block_management import ACTOR_LOCAL, BlockFailed, BlockManager, BlockRefused, printable
 from src.config import AuthConfig, Config, ReportsConfig
 from src.database import Database
@@ -498,9 +498,20 @@ def _init_block_management(
         """The Blocked IPs management page: active blocks, history and the
         audit log for everyone signed in; the write controls only for those
         allowed to use them."""
+        user = g.get("current_user")
+        is_admin = not auth_enabled or (user is not None and user.role == ROLE_ADMIN)
+        refusal = write_refusal() if is_admin else None
+        settings = manager.settings
         return render_template(
             "blocks.html",
             refresh_interval=app.config["NETSENTRY_REFRESH_INTERVAL"],
+            is_admin=is_admin,
+            can_write=is_admin and refusal is None,
+            write_refusal=refusal,
+            page_csrf_token=csrf_token() if auth_enabled else local_csrf_token,
+            default_duration=settings.default_duration_minutes,
+            max_duration=settings.max_duration_minutes,
+            allow_permanent=settings.allow_permanent,
         )
 
     @app.route("/api/blocks/history")

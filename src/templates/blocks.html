@@ -54,6 +54,17 @@
   .remaining { display: block; color: var(--muted); font-size: 0.78rem; }
   .remaining.expired { color: var(--warn); }
   .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.85rem; }
+  .block-form { margin-bottom: 1.25rem; }
+  .block-form form { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: flex-end; }
+  .block-form label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.8rem; color: var(--muted); }
+  .block-form label.grow { flex: 1 1 14rem; }
+  .block-form input[name=target] { width: 15rem; }
+  .block-form input[name=custom] { width: 7rem; }
+  .hint { font-size: 0.78rem; margin: 0.6rem 0 0; }
+  .row-actions { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+  .row-actions .button { padding: 0.2rem 0.65rem; font-size: 0.75rem; }
+  .bulk-bar { display: flex; align-items: center; gap: 0.6rem; margin: 0 0 0.6rem; font-size: 0.85rem; }
+  th.check, td.check { width: 2rem; }
 {% endblock %}
 {% block header_right %}
 <div class="user-nav">
@@ -73,21 +84,73 @@
   <span class="muted" id="last-updated">loading&hellip;</span>
 </div>
 
+<div id="flash" class="message" hidden></div>
+{% if write_refusal %}
+<div class="message error">{{ write_refusal }}</div>
+{% endif %}
+
+{% if can_write %}
+<section class="card block-form">
+  <form id="block-form" autocomplete="off">
+    <label>IP address or CIDR range
+      <input name="target" required maxlength="64" spellcheck="false"
+             placeholder="45.33.12.7 or 45.33.12.0/24"
+             pattern="[0-9A-Fa-f.:]+(/[0-9]{1,3})?"
+             title="A single IP address (IPv4 or IPv6) or a CIDR range, up to /16 for IPv4 and /48 for IPv6">
+    </label>
+    <label>Duration
+      <select name="duration">
+        {% set presets = [(15, "15 minutes"), (60, "1 hour"), (1440, "24 hours"), (10080, "7 days")] %}
+        {% set ns = namespace(matched=false) %}
+        {% for minutes, label in presets if minutes <= max_duration %}
+        <option value="{{ minutes }}" {% if minutes == default_duration %}selected{% set ns.matched = true %}{% endif %}>{{ label }}</option>
+        {% endfor %}
+        <option value="custom" {% if not ns.matched and default_duration != 0 %}selected{% endif %}>Custom&hellip;</option>
+        {% if allow_permanent %}<option value="0" {% if default_duration == 0 %}selected{% endif %}>Permanent</option>{% endif %}
+      </select>
+    </label>
+    <label id="custom-duration">Minutes
+      <input type="number" name="custom" min="1" max="{{ max_duration }}" step="1" value="{{ default_duration or '' }}">
+    </label>
+    <label class="grow">Reason (optional)
+      <input name="reason" maxlength="200" placeholder="e.g. brute force from this range">
+    </label>
+    <button type="submit" class="button primary">Block</button>
+  </form>
+  <p class="hint muted">
+    A single IP is blocked unless you give a range. Private, loopback, link-local and multicast
+    addresses, this machine, its gateway, whitelisted IPs and your own address are never blocked.
+    Durations up to {{ max_duration }} minutes{% if allow_permanent %}, or permanent{% endif %}.
+    The server checks everything again.
+  </p>
+</section>
+{% elif not is_admin %}
+<p class="muted" style="font-size: 0.85rem;">Read only: blocking and unblocking needs the admin role.</p>
+{% endif %}
+
 <section id="tab-active">
+  {% if can_write %}
+  <div class="bulk-bar">
+    <button type="button" class="button danger" id="bulk-unblock" disabled>Unblock selected</button>
+    <span class="muted" id="bulk-count"></span>
+  </div>
+  {% endif %}
   <div class="table-wrap">
     <table>
       <thead>
         <tr>
+          {% if can_write %}<th class="check"><input type="checkbox" id="select-all" title="Select all"></th>{% endif %}
           <th>IP or range</th>
           <th>Source</th>
           <th>Event or reason</th>
           <th>Blocked at</th>
           <th>Expires</th>
           <th>Created by</th>
+          {% if can_write %}<th>Actions</th>{% endif %}
         </tr>
       </thead>
       <tbody id="active-body">
-        <tr><td colspan="6" class="empty">Loading&hellip;</td></tr>
+        <tr><td colspan="{{ 8 if can_write else 6 }}" class="empty">Loading&hellip;</td></tr>
       </tbody>
     </table>
   </div>
@@ -96,7 +159,13 @@
 <script>
 const PAGE = {
   refreshMs: {{ refresh_interval|tojson }} * 1000,
+  canWrite: {{ can_write|tojson }},
+  csrfToken: {{ page_csrf_token|tojson }},
+  defaultDuration: {{ default_duration|tojson }},
+  maxDuration: {{ max_duration|tojson }},
+  allowPermanent: {{ allow_permanent|tojson }},
 };
+const ACTIVE_COLUMNS = PAGE.canWrite ? 8 : 6;
 
 // Every value from the server is put on the page with textContent, never
 // as HTML, so stored text (reasons, usernames...) can't inject markup.
@@ -135,6 +204,25 @@ async function api(path, options) {
   return response;
 }
 
+function showMessage(text, kind) {
+  const flash = document.getElementById("flash");
+  flash.textContent = text;
+  flash.className = "message " + kind;
+  flash.hidden = false;
+}
+
+// every change is a JSON POST carrying the CSRF token in a header
+async function send(path, body) {
+  const response = await api(path, {
+    method: "POST",
+    headers: {"Content-Type": "application/json", "X-CSRF-Token": PAGE.csrfToken},
+    body: JSON.stringify(body),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `Request failed (HTTP ${response.status}).`);
+  return data;
+}
+
 function emptyRow(body, columns, text) {
   const row = el("tr");
   const cell = el("td", text, "empty");
@@ -145,6 +233,16 @@ function emptyRow(body, columns, text) {
 
 function activeRow(b) {
   const row = el("tr");
+  if (PAGE.canWrite) {
+    const check = el("td", null, "check");
+    const box = el("input");
+    box.type = "checkbox";
+    box.className = "row-select";
+    box.dataset.id = b.id;
+    box.addEventListener("change", updateBulk);
+    check.appendChild(box);
+    row.appendChild(check);
+  }
   row.appendChild(el("td", b.source_ip, "mono"));
 
   const source = el("td");
@@ -165,15 +263,135 @@ function activeRow(b) {
   expires.appendChild(remaining);
   row.appendChild(expires);
   row.appendChild(el("td", b.created_by || (b.source === "auto" ? "auto-block" : "—")));
+  if (PAGE.canWrite) {
+    const actions = el("td");
+    const wrap = el("div", null, "row-actions");
+    const unblock = el("button", "Unblock", "button danger");
+    unblock.type = "button";
+    unblock.addEventListener("click", () => unblockOne(b));
+    const extend = el("button", "Extend", "button");
+    extend.type = "button";
+    extend.addEventListener("click", () => changeDuration(b));
+    wrap.append(unblock, extend);
+    actions.appendChild(wrap);
+    row.appendChild(actions);
+  }
   return row;
+}
+
+async function unblockOne(b) {
+  if (!confirm(`Unblock ${b.source_ip}? Traffic from it will be allowed again.`)) return;
+  try {
+    showMessage((await send(`/api/blocks/${b.id}/unblock`, {})).message, "success");
+  } catch (err) {
+    showMessage(err.message, "error");
+  }
+  loadActive();
+}
+
+async function changeDuration(b) {
+  const hint = PAGE.allowPermanent ? ", or 0 for permanent" : "";
+  const answer = prompt(
+    `New duration for ${b.source_ip}, in minutes from now (1 to ${PAGE.maxDuration}${hint}):`,
+    String(PAGE.defaultDuration || 60),
+  );
+  if (answer === null) return;
+  const minutes = Number(answer.trim());
+  if (!Number.isInteger(minutes) || minutes < 0) {
+    showMessage("Enter a whole number of minutes.", "error");
+    return;
+  }
+  try {
+    showMessage((await send(`/api/blocks/${b.id}/duration`, {duration_minutes: minutes})).message, "success");
+  } catch (err) {
+    showMessage(err.message, "error");
+  }
+  loadActive();
+}
+
+function selectedRows() {
+  return [...document.querySelectorAll(".row-select:checked")];
+}
+
+function updateBulk() {
+  if (!PAGE.canWrite) return;
+  const count = selectedRows().length;
+  document.getElementById("bulk-unblock").disabled = count === 0;
+  document.getElementById("bulk-count").textContent = count ? `${count} selected` : "";
+}
+
+async function unblockSelected() {
+  const rows = selectedRows();
+  const plural = rows.length === 1 ? "entry" : "entries";
+  if (!rows.length || !confirm(`Unblock ${rows.length} selected ${plural}?`)) return;
+  try {
+    const data = await send("/api/blocks/unblock", {ids: rows.map(r => Number(r.dataset.id))});
+    const failed = data.results.filter(r => !r.ok);
+    if (failed.length) {
+      const done = data.results.length - failed.length;
+      showMessage(`${done} unblocked; ${failed.length} failed: ` + failed.map(r => r.message).join(" "), "error");
+    } else {
+      showMessage(`Unblocked ${data.results.length} ${data.results.length === 1 ? "entry" : "entries"}.`, "success");
+    }
+  } catch (err) {
+    showMessage(err.message, "error");
+  }
+  loadActive();
+}
+
+function durationFromForm(form) {
+  const choice = form.elements.duration.value;
+  if (choice !== "custom") return Number(choice);
+  const minutes = Number(form.elements.custom.value);
+  return Number.isInteger(minutes) && minutes > 0 ? minutes : null;
+}
+
+function toggleCustom() {
+  const form = document.getElementById("block-form");
+  document.getElementById("custom-duration").hidden = form.elements.duration.value !== "custom";
+}
+
+if (PAGE.canWrite) {
+  const form = document.getElementById("block-form");
+  form.elements.duration.addEventListener("change", toggleCustom);
+  toggleCustom();
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const minutes = durationFromForm(form);
+    if (minutes === null) {
+      showMessage("Enter the custom duration as a whole number of minutes.", "error");
+      return;
+    }
+    const target = form.elements.target.value.trim();
+    const label = minutes === 0 ? "permanently" : `for ${minutes} minutes`;
+    if (!confirm(`Block ${target} ${label}?`)) return;
+    try {
+      const data = await send("/api/blocks", {target, duration_minutes: minutes, reason: form.elements.reason.value});
+      showMessage(data.message, "success");
+      form.elements.target.value = "";
+      form.elements.reason.value = "";
+    } catch (err) {
+      showMessage(err.message, "error");
+    }
+    loadActive();
+  });
+  document.getElementById("bulk-unblock").addEventListener("click", unblockSelected);
+  document.getElementById("select-all").addEventListener("change", (event) => {
+    document.querySelectorAll(".row-select").forEach(box => { box.checked = event.target.checked; });
+    updateBulk();
+  });
 }
 
 async function loadActive() {
   try {
     const blocks = await (await api("/api/blocked_ips")).json();
     const body = document.getElementById("active-body");
-    if (!blocks.length) emptyRow(body, 6, "No IPs are currently blocked.");
+    const selected = new Set(selectedRows().map(r => r.dataset.id));
+    if (!blocks.length) emptyRow(body, ACTIVE_COLUMNS, "No IPs are currently blocked.");
     else body.replaceChildren(...blocks.map(activeRow));
+    // keep the user's selection across the periodic refresh
+    document.querySelectorAll(".row-select").forEach(box => { box.checked = selected.has(box.dataset.id); });
+    updateBulk();
     document.getElementById("last-updated").textContent = "updated " + new Date().toLocaleTimeString();
   } catch (err) {
     document.getElementById("last-updated").textContent = "connection error";
