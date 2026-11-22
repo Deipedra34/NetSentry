@@ -69,6 +69,11 @@ def rule_identifier_for(target: str) -> str:
     return RULE_PREFIX + normalize_target(target)
 
 
+def _linux_tool(target: str) -> str:
+    """iptables only handles IPv4; IPv6 rules live in ip6tables."""
+    return "ip6tables" if ipaddress.ip_network(target, strict=False).version == 6 else "iptables"
+
+
 def build_block_command(target: str) -> Optional[List[str]]:
     """The command (an argument list, never a shell string) that blocks
     inbound traffic from target on this OS, or None on an unsupported OS.
@@ -81,7 +86,7 @@ def build_block_command(target: str) -> Optional[List[str]]:
             f"name={RULE_PREFIX}{target}", "dir=in", "action=block", f"remoteip={target}",
         ]
     if system == "Linux":
-        return ["iptables", "-A", "INPUT", "-s", target, "-j", "DROP"]
+        return [_linux_tool(target), "-A", "INPUT", "-s", target, "-j", "DROP"]
     return None
 
 
@@ -99,7 +104,7 @@ def build_unblock_command(target: str, rule_identifier: Optional[str] = None) ->
     if system == "Windows":
         return ["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule}"]
     if system == "Linux":
-        return ["iptables", "-D", "INPUT", "-s", target, "-j", "DROP"]
+        return [_linux_tool(target), "-D", "INPUT", "-s", target, "-j", "DROP"]
     return None
 
 
