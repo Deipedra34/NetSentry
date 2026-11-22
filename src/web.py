@@ -492,6 +492,17 @@ def _init_block_management(
             status,
         )
 
+    @app.route("/blocks")
+    @login_required
+    def blocks_page() -> Any:
+        """The Blocked IPs management page: active blocks, history and the
+        audit log for everyone signed in; the write controls only for those
+        allowed to use them."""
+        return render_template(
+            "blocks.html",
+            refresh_interval=app.config["NETSENTRY_REFRESH_INTERVAL"],
+        )
+
     @app.route("/api/blocks/history")
     @login_required
     def api_block_history() -> Any:

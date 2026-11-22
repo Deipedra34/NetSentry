@@ -1,0 +1,196 @@
+{% extends "auth_base.html" %}
+{% block title %}Blocked IPs &middot; NetSentry{% endblock %}
+{% block styles %}
+  .user-nav { display: flex; align-items: center; gap: 0.6rem; font-size: 0.85rem; color: var(--muted); }
+  .user-nav form { margin: 0; }
+  .page-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  h2 { font-size: 1.05rem; margin: 0; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  thead th {
+    text-align: left;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  tbody td {
+    padding: 0.65rem 1rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.empty { text-align: center; color: var(--muted); padding: 1.5rem; }
+  .table-wrap { overflow-x: auto; }
+  .badge {
+    display: inline-block;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    margin: 0 0.25rem 0.2rem 0;
+    white-space: nowrap;
+  }
+  .badge.auto { background: rgba(91,141,239,0.15); color: var(--info); }
+  .badge.manual { background: rgba(240,169,60,0.15); color: var(--warn); }
+  .badge.dry { background: rgba(138,150,173,0.15); color: var(--muted); }
+  .remaining { display: block; color: var(--muted); font-size: 0.78rem; }
+  .remaining.expired { color: var(--warn); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.85rem; }
+{% endblock %}
+{% block header_right %}
+<div class="user-nav">
+  {% if current_user %}<span>{{ current_user.username }} &middot; {{ current_user.role }}</span>{% endif %}
+  <a class="button" href="/">Dashboard</a>
+  {% if current_user %}
+  <form method="post" action="/logout">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit" class="button">Sign out</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h2>Blocked IPs</h2>
+  <span class="muted" id="last-updated">loading&hellip;</span>
+</div>
+
+<section id="tab-active">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>IP or range</th>
+          <th>Source</th>
+          <th>Event or reason</th>
+          <th>Blocked at</th>
+          <th>Expires</th>
+          <th>Created by</th>
+        </tr>
+      </thead>
+      <tbody id="active-body">
+        <tr><td colspan="6" class="empty">Loading&hellip;</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+const PAGE = {
+  refreshMs: {{ refresh_interval|tojson }} * 1000,
+};
+
+// Every value from the server is put on the page with textContent, never
+// as HTML, so stored text (reasons, usernames...) can't inject markup.
+function el(tag, text, className) {
+  const node = document.createElement(tag);
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  if (className) node.className = className;
+  return node;
+}
+
+function badge(text, kind) {
+  return el("span", text, "badge " + kind);
+}
+
+function formatTime(iso) {
+  return iso ? new Date(iso).toLocaleString() : "—";
+}
+
+function formatRemaining(iso) {
+  if (!iso) return "permanent";
+  const ms = new Date(iso).getTime() - Date.now();
+  if (ms <= 0) return "expired — lifted at the next expiry check";
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  if (d) return `${d}d ${h}h left`;
+  if (h) return `${h}h ${m}m left`;
+  return `${m}m ${s % 60}s left`;
+}
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  if (response.status === 401) {
+    window.location.href = "/login?next=" + encodeURIComponent("/blocks");
+    throw new Error("signed out");
+  }
+  return response;
+}
+
+function emptyRow(body, columns, text) {
+  const row = el("tr");
+  const cell = el("td", text, "empty");
+  cell.colSpan = columns;
+  row.appendChild(cell);
+  body.replaceChildren(row);
+}
+
+function activeRow(b) {
+  const row = el("tr");
+  row.appendChild(el("td", b.source_ip, "mono"));
+
+  const source = el("td");
+  source.appendChild(badge(b.source, b.source === "manual" ? "manual" : "auto"));
+  if (b.dry_run) source.appendChild(badge("dry run (not applied)", "dry"));
+  row.appendChild(source);
+
+  const what = el("td");
+  if (b.event_type && b.event_type !== "MANUAL") what.appendChild(el("div", b.event_type));
+  if (b.reason) what.appendChild(el("div", b.reason));
+  if (!what.childNodes.length) what.textContent = "—";
+  row.appendChild(what);
+
+  row.appendChild(el("td", formatTime(b.blocked_at)));
+  const expires = el("td", formatTime(b.expires_at));
+  const remaining = el("span", formatRemaining(b.expires_at), "remaining");
+  remaining.dataset.expires = b.expires_at || "";
+  expires.appendChild(remaining);
+  row.appendChild(expires);
+  row.appendChild(el("td", b.created_by || (b.source === "auto" ? "auto-block" : "—")));
+  return row;
+}
+
+async function loadActive() {
+  try {
+    const blocks = await (await api("/api/blocked_ips")).json();
+    const body = document.getElementById("active-body");
+    if (!blocks.length) emptyRow(body, 6, "No IPs are currently blocked.");
+    else body.replaceChildren(...blocks.map(activeRow));
+    document.getElementById("last-updated").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (err) {
+    document.getElementById("last-updated").textContent = "connection error";
+    console.error("NetSentry: loading blocked IPs failed:", err);
+  }
+}
+
+// the "time left" counters tick every second between refreshes
+function tick() {
+  document.querySelectorAll(".remaining[data-expires]").forEach(span => {
+    span.textContent = formatRemaining(span.dataset.expires || null);
+    span.classList.toggle("expired", span.textContent.startsWith("expired"));
+  });
+}
+
+loadActive();
+setInterval(loadActive, PAGE.refreshMs);
+setInterval(tick, 1000);
+</script>
+{% endblock %}
