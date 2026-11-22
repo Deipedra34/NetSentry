@@ -505,6 +505,26 @@ class AuthConfig:
 
 
 @dataclass
+class BlockManagementConfig:
+    """Manual blocking from the dashboard and the CLI -- see
+    src/block_management.py and README.md "Managing Blocked IPs". Shares
+    the firewall commands and auto_block.dry_run with automatic blocking;
+    the never-block safety rules aren't configurable."""
+
+    enabled: bool = True
+    # duration of a manual block when none is given; 0 = permanent
+    default_duration_minutes: int = 60
+    # longest non-permanent manual block (7 days)
+    max_duration_minutes: int = 10080
+    # whether manual blocks may be permanent (never expire)
+    allow_permanent: bool = True
+    # active manual blocks at most, so the firewall rule table can't be flooded
+    max_manual_blocks: int = 500
+    # audit log and block history entries older than this are pruned at startup
+    audit_keep_days: int = 365
+
+
+@dataclass
 class WebConfig:
     """Flask dashboard settings."""
 
@@ -551,6 +571,7 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     web: WebConfig = field(default_factory=WebConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
+    block_management: BlockManagementConfig = field(default_factory=BlockManagementConfig)
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     pcap_export: PcapExportConfig = field(default_factory=PcapExportConfig)
     auto_block: AutoBlockConfig = field(default_factory=AutoBlockConfig)
