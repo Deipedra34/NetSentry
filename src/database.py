@@ -175,6 +175,44 @@ class AuditEntry:
         }
 
 
+@dataclass
+class BlockHistoryEntry:
+    """A block that has been lifted: the blocked_ips row it was, plus how
+    it ended. outcome is "expired" (lifted by the expiry check) or
+    "unblocked" (removed by hand); removed_by is who removed it ("auto" for
+    an expiry)."""
+
+    source_ip: str
+    source: str
+    event_type: str
+    blocked_at: datetime
+    expires_at: Optional[datetime]
+    removed_at: datetime
+    outcome: str
+    removed_by: str
+    created_by: Optional[str] = None
+    reason: str = ""
+    dry_run: bool = False
+    id: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """for jsonify() basically, converts to plain dict"""
+        return {
+            "id": self.id,
+            "source_ip": self.source_ip,
+            "source": self.source,
+            "event_type": self.event_type,
+            "reason": self.reason,
+            "created_by": self.created_by,
+            "blocked_at": self.blocked_at.isoformat(),
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "removed_at": self.removed_at.isoformat(),
+            "outcome": self.outcome,
+            "removed_by": self.removed_by,
+            "dry_run": self.dry_run,
+        }
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -237,6 +275,23 @@ CREATE TABLE IF NOT EXISTS block_audit (
     result TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_block_audit_timestamp ON block_audit (timestamp);
+
+-- blocks that have been lifted (blocked_ips only holds active ones)
+CREATE TABLE IF NOT EXISTS block_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_ip TEXT NOT NULL,
+    source TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    created_by TEXT,
+    blocked_at TEXT NOT NULL,
+    expires_at TEXT,
+    removed_at TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    removed_by TEXT NOT NULL,
+    dry_run INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_block_history_removed_at ON block_history (removed_at);
 """
 
 _USER_COLUMNS = "id, username, password_hash, role, created_at, last_login_at, disabled"
@@ -298,6 +353,23 @@ def _row_to_audit_entry(row: sqlite3.Row) -> AuditEntry:
         target=row["target"],
         details=row["details"],
         result=row["result"],
+    )
+
+
+def _row_to_history(row: sqlite3.Row) -> BlockHistoryEntry:
+    return BlockHistoryEntry(
+        id=row["id"],
+        source_ip=row["source_ip"],
+        source=row["source"],
+        event_type=row["event_type"],
+        reason=row["reason"],
+        created_by=row["created_by"],
+        blocked_at=datetime.fromisoformat(row["blocked_at"]),
+        expires_at=datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None,
+        removed_at=datetime.fromisoformat(row["removed_at"]),
+        outcome=row["outcome"],
+        removed_by=row["removed_by"],
+        dry_run=bool(row["dry_run"]),
     )
 
 
@@ -794,6 +866,75 @@ class Database:
             cursor = self._conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
             self._conn.commit()
         return cursor.rowcount > 0
+
+    def add_block_history(
+        self,
+        blocked: BlockedIP,
+        outcome: str,
+        removed_by: str,
+        removed_at: Optional[datetime] = None,
+    ) -> BlockHistoryEntry:
+        """Records that `blocked` was lifted (call it when the blocked_ips row
+        is removed) and returns the history entry."""
+        entry = BlockHistoryEntry(
+            source_ip=blocked.source_ip,
+            source=blocked.source,
+            event_type=blocked.event_type,
+            reason=blocked.reason,
+            created_by=blocked.created_by,
+            blocked_at=blocked.blocked_at,
+            expires_at=blocked.expires_at,
+            removed_at=removed_at or datetime.now(timezone.utc),
+            outcome=outcome,
+            removed_by=removed_by,
+            dry_run=blocked.dry_run,
+        )
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO block_history (source_ip, source, event_type, reason, created_by, "
+                "blocked_at, expires_at, removed_at, outcome, removed_by, dry_run) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entry.source_ip,
+                    entry.source,
+                    entry.event_type,
+                    entry.reason,
+                    entry.created_by,
+                    entry.blocked_at.isoformat(),
+                    entry.expires_at.isoformat() if entry.expires_at else None,
+                    entry.removed_at.isoformat(),
+                    entry.outcome,
+                    entry.removed_by,
+                    1 if entry.dry_run else 0,
+                ),
+            )
+            self._conn.commit()
+            entry.id = cursor.lastrowid
+        return entry
+
+    def get_block_history(self, limit: int = 50, offset: int = 0) -> List[BlockHistoryEntry]:
+        """Lifted blocks, most recently lifted first; limit/offset page."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM block_history ORDER BY removed_at DESC, id DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        return [_row_to_history(row) for row in rows]
+
+    def count_block_history(self) -> int:
+        """How many lifted blocks are on record."""
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS c FROM block_history").fetchone()
+        return int(row["c"])
+
+    def prune_block_history(self, before: datetime) -> int:
+        """Deletes history entries lifted before `before`; returns how many."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM block_history WHERE removed_at < ?", (before.isoformat(),)
+            )
+            self._conn.commit()
+        return cursor.rowcount
 
     def add_audit_entry(self, entry: AuditEntry) -> AuditEntry:
         """Appends an audit log entry, sets its id and hands it back."""
