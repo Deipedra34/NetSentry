@@ -65,6 +65,27 @@
   .row-actions .button { padding: 0.2rem 0.65rem; font-size: 0.75rem; }
   .bulk-bar { display: flex; align-items: center; gap: 0.6rem; margin: 0 0 0.6rem; font-size: 0.85rem; }
   th.check, td.check { width: 2rem; }
+  .tabs { display: flex; gap: 0.35rem; margin: 0 0 1rem; flex-wrap: wrap; }
+  .tabs button {
+    background: var(--panel);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.3rem 0.9rem;
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .tabs button:hover { color: var(--text); }
+  .tabs button.active { color: var(--accent); border-color: var(--accent); background: rgba(79,209,197,0.1); }
+  .filters { display: flex; gap: 0.6rem; align-items: center; margin: 0 0 0.75rem; flex-wrap: wrap; font-size: 0.85rem; }
+  .filters select { padding: 0.3rem 0.5rem; font-size: 0.82rem; }
+  .pager { display: flex; gap: 0.6rem; align-items: center; justify-content: flex-end; margin-top: 0.75rem; font-size: 0.85rem; }
+  .result-success { color: var(--accent); }
+  .result-dry_run { color: var(--muted); }
+  .result-refused { color: var(--warn); }
+  .result-failed { color: var(--danger); }
 {% endblock %}
 {% block header_right %}
 <div class="user-nav">
@@ -128,6 +149,12 @@
 <p class="muted" style="font-size: 0.85rem;">Read only: blocking and unblocking needs the admin role.</p>
 {% endif %}
 
+<nav class="tabs" id="tabs">
+  <button type="button" data-tab="active" class="active">Active</button>
+  <button type="button" data-tab="history">History</button>
+  <button type="button" data-tab="audit">Audit log</button>
+</nav>
+
 <section id="tab-active">
   {% if can_write %}
   <div class="bulk-bar">
@@ -154,6 +181,53 @@
       </tbody>
     </table>
   </div>
+</section>
+
+<section id="tab-history" hidden>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>IP or range</th>
+          <th>Source</th>
+          <th>Event or reason</th>
+          <th>Blocked at</th>
+          <th>Ended</th>
+          <th>Outcome</th>
+          <th>Removed by</th>
+        </tr>
+      </thead>
+      <tbody id="history-body">
+        <tr><td colspan="7" class="empty">Loading&hellip;</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="pager" id="history-pager"></div>
+</section>
+
+<section id="tab-audit" hidden>
+  <div class="filters">
+    <label>Action <select id="audit-action"><option value="">All actions</option></select></label>
+    <label>User <select id="audit-user"><option value="">All users</option></select></label>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>User</th>
+          <th>Action</th>
+          <th>Target</th>
+          <th>Result</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody id="audit-body">
+        <tr><td colspan="6" class="empty">Loading&hellip;</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="pager" id="audit-pager"></div>
 </section>
 
 <script>
@@ -407,8 +481,112 @@ function tick() {
   });
 }
 
-loadActive();
-setInterval(loadActive, PAGE.refreshMs);
+// --- history and audit log tabs ---------------------------------------------
+
+const PAGES = {history: 1, audit: 1};
+
+function pager(id, data, onPage) {
+  const box = document.getElementById(id);
+  const prev = el("button", "← Newer", "button");
+  prev.type = "button";
+  prev.disabled = data.page <= 1;
+  prev.addEventListener("click", () => onPage(data.page - 1));
+  const next = el("button", "Older →", "button");
+  next.type = "button";
+  next.disabled = data.page >= data.pages;
+  next.addEventListener("click", () => onPage(data.page + 1));
+  box.replaceChildren(prev, el("span", `Page ${data.page} of ${data.pages} (${data.total} total)`, "muted"), next);
+}
+
+function historyRow(h) {
+  const row = el("tr");
+  row.appendChild(el("td", h.source_ip, "mono"));
+  const source = el("td");
+  source.appendChild(badge(h.source, h.source === "manual" ? "manual" : "auto"));
+  if (h.dry_run) source.appendChild(badge("dry run (not applied)", "dry"));
+  row.appendChild(source);
+  const what = [h.event_type !== "MANUAL" ? h.event_type : "", h.reason].filter(Boolean).join(" — ");
+  row.appendChild(el("td", what || "—"));
+  row.appendChild(el("td", formatTime(h.blocked_at)));
+  row.appendChild(el("td", formatTime(h.removed_at)));
+  row.appendChild(el("td", h.outcome));
+  row.appendChild(el("td", h.removed_by));
+  return row;
+}
+
+async function loadHistory(page) {
+  PAGES.history = page || PAGES.history;
+  const data = await (await api(`/api/blocks/history?page=${PAGES.history}`)).json();
+  const body = document.getElementById("history-body");
+  if (!data.entries.length) emptyRow(body, 7, "No blocks have been lifted yet.");
+  else body.replaceChildren(...data.entries.map(historyRow));
+  pager("history-pager", data, loadHistory);
+}
+
+function fillFilter(id, values, allLabel) {
+  const select = document.getElementById(id);
+  const current = select.value;
+  const options = [el("option", allLabel)];
+  options[0].value = "";
+  for (const value of values) {
+    const option = el("option", value);
+    option.value = value;
+    options.push(option);
+  }
+  select.replaceChildren(...options);
+  select.value = values.includes(current) ? current : "";
+}
+
+function auditRow(e) {
+  const row = el("tr");
+  row.appendChild(el("td", formatTime(e.timestamp)));
+  row.appendChild(el("td", e.actor));
+  row.appendChild(el("td", e.action));
+  row.appendChild(el("td", e.target, "mono"));
+  row.appendChild(el("td", e.result.replace("_", " "), "result-" + e.result));
+  row.appendChild(el("td", e.details || "—"));
+  return row;
+}
+
+async function loadAudit(page) {
+  PAGES.audit = page || PAGES.audit;
+  const params = new URLSearchParams({page: PAGES.audit});
+  const action = document.getElementById("audit-action").value;
+  const user = document.getElementById("audit-user").value;
+  if (action) params.set("action", action);
+  if (user) params.set("user", user);
+  const data = await (await api(`/api/blocks/audit?${params}`)).json();
+  fillFilter("audit-action", data.actions, "All actions");
+  fillFilter("audit-user", data.users, "All users");
+  const body = document.getElementById("audit-body");
+  if (!data.entries.length) emptyRow(body, 6, "No audit log entries match.");
+  else body.replaceChildren(...data.entries.map(auditRow));
+  pager("audit-pager", data, loadAudit);
+}
+
+for (const id of ["audit-action", "audit-user"]) {
+  document.getElementById(id).addEventListener("change", () => loadAudit(1));
+}
+
+let currentTab = "active";
+document.getElementById("tabs").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-tab]");
+  if (!button) return;
+  currentTab = button.dataset.tab;
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("active", b === button));
+  for (const tab of ["active", "history", "audit"]) {
+    document.getElementById("tab-" + tab).hidden = tab !== currentTab;
+  }
+  refresh();
+});
+
+function refresh() {
+  const load = {active: loadActive, history: () => loadHistory(), audit: () => loadAudit()}[currentTab];
+  Promise.resolve(load()).catch(err => console.error("NetSentry: refresh failed:", err));
+}
+
+refresh();
+setInterval(refresh, PAGE.refreshMs);
 setInterval(tick, 1000);
 </script>
 {% endblock %}
