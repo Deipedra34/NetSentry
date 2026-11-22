@@ -13,13 +13,15 @@ import logging
 import math
 import secrets
 import time
+from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from flask import Flask, Response, flash, g, jsonify, redirect, render_template, request
 
-from src.auth import login_required
-from src.block_management import BlockManager
+from src.auth import CSRF_HEADER, ROLE_ADMIN, admin_required, login_required
+from src.block_management import ACTOR_LOCAL, BlockFailed, BlockManager, BlockRefused, printable
 from src.config import AuthConfig, Config, ReportsConfig
 from src.database import Database
 
@@ -360,11 +362,135 @@ def _paged(entries: List[Dict[str, Any]], total: int, page: int, per_page: int) 
     }
 
 
-def _init_block_management(app: Flask, database: Database, manager: BlockManager) -> None:
+def is_loopback_host(host: Optional[str]) -> bool:
+    """True if host (a bind address, or a Host header's hostname) only
+    means this machine: 127.0.0.1, ::1, localhost -- not 0.0.0.0, a LAN
+    address, a domain name etc."""
+    host = (host or "").strip().lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+NETWORK_WRITE_REFUSED = (
+    "Blocking and unblocking from the dashboard needs dashboard accounts when it can be "
+    "reached over the network: set auth.enabled: true and sign in as an admin (see README.md "
+    "'Managing Blocked IPs'). Without authentication the page stays read-only unless the "
+    "dashboard only listens on localhost."
+)
+LOCAL_CSRF_REFUSED = "Missing or invalid CSRF token. Reload the page and try again."
+# most entries one bulk unblock may name
+MAX_BULK_UNBLOCK = 500
+
+
+def _init_block_management(
+    app: Flask,
+    database: Database,
+    manager: BlockManager,
+    auth_enabled: bool,
+    bind_host: Optional[str],
+) -> None:
     """The Blocked IPs management endpoints: block history and the audit
-    log (read by both roles). Only called when block_management.enabled
-    is on; the active blocks list is /api/blocked_ips, which always
-    exists."""
+    log (read by both roles), and the admin-only write actions -- block,
+    unblock, bulk unblock and change duration. Only called when
+    block_management.enabled is on; the active blocks list is
+    /api/blocked_ips, which always exists.
+
+    With auth enabled, writes need the admin role (the existing
+    admin_required decorator) and the session CSRF token (checked for
+    every POST by _init_auth's hook). With auth off there are no accounts,
+    so writes are only allowed while the dashboard listens on localhost
+    and the request really is local -- the desktop app's case -- and they
+    must carry this app's own CSRF token (local_csrf_token), which only a
+    page served by this dashboard knows. Anonymous firewall changes over a
+    network are never allowed."""
+    local_csrf_token = secrets.token_urlsafe(32)
+    app.config["NETSENTRY_LOCAL_CSRF_TOKEN"] = local_csrf_token
+    app.config["NETSENTRY_BLOCK_MANAGER"] = manager
+
+    def _request_is_local() -> bool:
+        """The dashboard only listens on loopback, the request came from
+        loopback, and the Host header names a loopback host -- the last one
+        stops a DNS-rebinding page (evil.example resolving to 127.0.0.1)
+        from talking to the dashboard as if it were local."""
+        hostname = urlsplit("//" + (request.host or "")).hostname
+        try:
+            remote_is_loopback = ipaddress.ip_address(request.remote_addr or "").is_loopback
+        except ValueError:
+            remote_is_loopback = False
+        return is_loopback_host(bind_host) and remote_is_loopback and is_loopback_host(hostname)
+
+    def write_refusal() -> Optional[str]:
+        """Why this request may not change blocks (None if it may). With
+        auth on, role and CSRF are already enforced elsewhere."""
+        if auth_enabled:
+            return None
+        return None if _request_is_local() else NETWORK_WRITE_REFUSED
+
+    app.config["NETSENTRY_BLOCK_WRITE_REFUSAL"] = write_refusal
+
+    def _actor() -> str:
+        user = g.get("current_user")
+        return user.username if auth_enabled and user is not None else ACTOR_LOCAL
+
+    def _body() -> Dict[str, Any]:
+        body = request.get_json(silent=True)
+        return body if isinstance(body, dict) else {}
+
+    def _audit_refusal(action: str, target: str, actor: str, rule: str, message: str) -> None:
+        from src.database import AuditEntry
+
+        database.add_audit_entry(
+            AuditEntry(
+                actor=printable(actor, 64) or "unknown",
+                action=action,
+                target=printable(target, 64) or "-",
+                result="refused",
+                details=printable(f"refused by rule '{rule}': {message}", 500),
+            )
+        )
+        logger.warning("Block management: %s %s %s refused (%s)", actor, action, target, rule)
+
+    def write_endpoint(action: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """admin_required, plus the auth-off localhost rule and local CSRF
+        token, with refusals written to the audit log."""
+
+        def decorate(view: Callable[..., Any]) -> Callable[..., Any]:
+            guarded = admin_required(view)
+
+            @wraps(view)
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                target = str(_body().get("target") or kwargs.get("block_id") or "-")
+                user = g.get("current_user")
+                if auth_enabled and user is not None and user.role != ROLE_ADMIN:
+                    _audit_refusal(action, target, user.username, "admin_required", "the admin role is required")
+                    return guarded(*args, **kwargs)  # the decorator answers 403
+                refusal = write_refusal()
+                if refusal:
+                    _audit_refusal(action, target, "anonymous", "network_write_without_auth", refusal)
+                    return jsonify({"error": refusal, "rule": "network_write_without_auth"}), 403
+                if not auth_enabled and not secrets.compare_digest(
+                    request.headers.get(CSRF_HEADER, ""), local_csrf_token
+                ):
+                    return jsonify({"error": LOCAL_CSRF_REFUSED}), 400
+                return guarded(*args, **kwargs)
+
+            return wrapper
+
+        return decorate
+
+    def _refused(exc: BlockRefused) -> Any:
+        status = 404 if exc.rule == "not_found" else 400
+        return jsonify({"error": str(exc), "rule": exc.rule}), status
+
+    def _done(result: Any, status: int = 200) -> Any:
+        return (
+            jsonify({"message": result.message, "applied": result.applied, "block": result.block.to_dict()}),
+            status,
+        )
 
     @app.route("/api/blocks/history")
     @login_required
@@ -394,6 +520,68 @@ def _init_block_management(app: Flask, database: Database, manager: BlockManager
         payload["actions"] = list(AUDIT_ACTIONS)
         payload["users"] = database.list_audit_actors()
         return jsonify(payload)
+
+    @app.route("/api/blocks", methods=["POST"])
+    @write_endpoint("block")
+    def api_block() -> Any:
+        """Blocks an IP or CIDR range: JSON {"target", "duration_minutes"
+        (omitted or null = the default, 0 = permanent), "reason"}. 201 on
+        success; 400 with the rule name if refused; 502 if the firewall
+        command failed."""
+        body = _body()
+        try:
+            result = manager.block(
+                str(body.get("target") or ""),
+                body.get("duration_minutes"),
+                str(body.get("reason") or ""),
+                actor=_actor(),
+                requester_ip=request.remote_addr,
+            )
+        except BlockRefused as exc:
+            return _refused(exc)
+        except BlockFailed as exc:
+            return jsonify({"error": str(exc)}), 502
+        return _done(result, 201)
+
+    @app.route("/api/blocks/<int:block_id>/unblock", methods=["POST"])
+    @write_endpoint("unblock")
+    def api_unblock(block_id: int) -> Any:
+        """Lifts one active block, automatic or manual. 502 (and the block
+        stays listed) if the firewall command fails."""
+        try:
+            return _done(manager.unblock(block_id, actor=_actor()))
+        except BlockRefused as exc:
+            return _refused(exc)
+        except BlockFailed as exc:
+            return jsonify({"error": str(exc)}), 502
+
+    @app.route("/api/blocks/unblock", methods=["POST"])
+    @write_endpoint("unblock")
+    def api_bulk_unblock() -> Any:
+        """Lifts several blocks: JSON {"ids": [...]}. Each one is handled
+        (and audited) on its own; the response lists how each went."""
+        ids = _body().get("ids")
+        if (
+            not isinstance(ids, list)
+            or not ids
+            or len(ids) > MAX_BULK_UNBLOCK
+            or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids)
+        ):
+            return jsonify({"error": f"Send \"ids\": a list of 1 to {MAX_BULK_UNBLOCK} block ids."}), 400
+        results = manager.unblock_many(ids, actor=_actor())
+        return jsonify(
+            {"results": [{"id": block_id, "ok": ok, "message": message} for block_id, ok, message in results]}
+        )
+
+    @app.route("/api/blocks/<int:block_id>/duration", methods=["POST"])
+    @write_endpoint("change_duration")
+    def api_change_duration(block_id: int) -> Any:
+        """Extends or shortens an active block: JSON {"duration_minutes"}
+        counted from now (0 = permanent)."""
+        try:
+            return _done(manager.change_duration(block_id, _body().get("duration_minutes"), actor=_actor()))
+        except BlockRefused as exc:
+            return _refused(exc)
 
 
 def create_app(
@@ -445,7 +633,7 @@ def create_app(
         _init_user_management(app, database, auth_config)
     block_manager = block_manager or BlockManager(Config(), database)
     if block_manager.settings.enabled:
-        _init_block_management(app, database, block_manager)
+        _init_block_management(app, database, block_manager, auth_enabled, bind_host)
         if username or password:
             logger.info(
                 "auth.enabled is on, so web.username/web.password (Basic Auth) are ignored."
