@@ -5,7 +5,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
-from src.auto_block import AutoBlocker
+import pytest
+
+from src.auto_block import (
+    AutoBlocker,
+    build_block_command,
+    build_unblock_command,
+    normalize_target,
+    rule_identifier_for,
+    run_firewall_command,
+)
 from src.config import Config
 from src.database import BlockedIP, Database, Event
 
@@ -260,3 +269,118 @@ def test_dry_run_expired_block_never_calls_subprocess(in_memory_db: Database) ->
 
     mock_run.assert_not_called()
     assert in_memory_db.get_blocked_ips() == []
+
+
+# --- shared firewall code path: automatic behavior unchanged --------------------------
+
+
+def _expired_block(**overrides: object) -> BlockedIP:
+    values: dict = dict(
+        source_ip="45.33.12.9",
+        event_type="SYN_FLOOD",
+        rule_identifier="NetSentry_Block_45.33.12.9",
+        blocked_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    values.update(overrides)
+    return BlockedIP(**values)  # type: ignore[arg-type]
+
+
+def test_ipv4_commands_are_exactly_what_they_were() -> None:
+    with patch("src.auto_block.platform.system", return_value="Windows"):
+        assert build_block_command("45.33.12.9") == [
+            "netsh", "advfirewall", "firewall", "add", "rule",
+            "name=NetSentry_Block_45.33.12.9", "dir=in", "action=block", "remoteip=45.33.12.9",
+        ]
+        assert build_unblock_command("45.33.12.9") == [
+            "netsh", "advfirewall", "firewall", "delete", "rule", "name=NetSentry_Block_45.33.12.9",
+        ]
+    with patch("src.auto_block.platform.system", return_value="Linux"):
+        assert build_block_command("45.33.12.9") == ["iptables", "-A", "INPUT", "-s", "45.33.12.9", "-j", "DROP"]
+        assert build_unblock_command("45.33.12.9") == ["iptables", "-D", "INPUT", "-s", "45.33.12.9", "-j", "DROP"]
+    assert rule_identifier_for("45.33.12.9") == "NetSentry_Block_45.33.12.9"
+
+
+def test_ipv6_targets_use_ip6tables_on_linux() -> None:
+    with patch("src.auto_block.platform.system", return_value="Linux"):
+        assert build_block_command("2606:4700::1")[0] == "ip6tables"  # type: ignore[index]
+        assert build_unblock_command("2606:4700::1")[0] == "ip6tables"  # type: ignore[index]
+
+
+def test_commands_are_only_ever_built_from_valid_targets() -> None:
+    for bad in ("45.33.12.9; reboot", "$(id)", "45.33.12.9 dir=out", ""):
+        with pytest.raises(ValueError):
+            build_block_command(bad)
+    assert normalize_target(" 45.33.12.9 ") == "45.33.12.9"
+    # a stored rule identifier that isn't one NetSentry wrote is never used
+    with pytest.raises(ValueError):
+        build_unblock_command("45.33.12.9", "NetSentry_Block_45.33.12.9 & del C:\\")
+
+
+def test_run_firewall_command_never_uses_a_shell_and_reports_failures() -> None:
+    with patch("src.auto_block.subprocess.run") as mock_run:
+        assert run_firewall_command(["iptables", "-L"]) is None
+    args, kwargs = mock_run.call_args
+    assert args == (["iptables", "-L"],)
+    assert "shell" not in kwargs
+    with patch("src.auto_block.subprocess.run", side_effect=FileNotFoundError("iptables not found")):
+        assert "iptables not found" in (run_firewall_command(["iptables", "-L"]) or "")
+
+
+def test_automatic_block_rows_are_marked_automatic(in_memory_db: Database) -> None:
+    blocker = AutoBlocker(_live_config(), in_memory_db)
+    with patch("src.auto_block.platform.system", return_value="Linux"), \
+         patch("src.auto_block.subprocess.run", return_value=MagicMock(returncode=0)):
+        blocker.maybe_block(_make_event(source_ip="45.33.12.9"))
+    (blocked,) = in_memory_db.get_blocked_ips()
+    assert (blocked.source, blocked.created_by, blocked.reason, blocked.dry_run) == ("auto", None, "", False)
+    assert blocked.rule_identifier == "NetSentry_Block_45.33.12.9"
+
+
+def test_dry_run_still_records_nothing(in_memory_db: Database) -> None:
+    config = _live_config()
+    config.auto_block.dry_run = True
+    with patch("src.auto_block.subprocess.run") as mock_run:
+        AutoBlocker(config, in_memory_db).maybe_block(_make_event(source_ip="45.33.12.9"))
+    mock_run.assert_not_called()
+    assert in_memory_db.get_blocked_ips() == []
+    assert in_memory_db.count_block_history() == 0
+
+
+def test_expired_block_moves_to_history(in_memory_db: Database) -> None:
+    in_memory_db.add_blocked_ip(_expired_block())
+    with patch("src.auto_block.platform.system", return_value="Linux"), \
+         patch("src.auto_block.subprocess.run", return_value=MagicMock(returncode=0)):
+        AutoBlocker(_live_config(), in_memory_db).maybe_check_expired(now=1_000_000.0)
+    assert in_memory_db.get_blocked_ips() == []
+    (entry,) = in_memory_db.get_block_history()
+    assert (entry.source_ip, entry.outcome, entry.removed_by, entry.source) == ("45.33.12.9", "expired", "auto", "auto")
+
+
+def test_failed_unblock_keeps_the_block_and_writes_no_history(in_memory_db: Database) -> None:
+    in_memory_db.add_blocked_ip(_expired_block())
+    with patch("src.auto_block.platform.system", return_value="Linux"), \
+         patch("src.auto_block.subprocess.run", side_effect=PermissionError("not root")):
+        AutoBlocker(_live_config(), in_memory_db).maybe_check_expired(now=1_000_000.0)
+    assert len(in_memory_db.get_blocked_ips()) == 1
+    assert in_memory_db.count_block_history() == 0
+
+
+def test_expired_dry_run_block_is_lifted_without_a_firewall_command_even_in_live_mode(in_memory_db: Database) -> None:
+    in_memory_db.add_blocked_ip(_expired_block(source="manual", created_by="alice", dry_run=True))
+    with patch("src.auto_block.platform.system", return_value="Linux"), \
+         patch("src.auto_block.subprocess.run") as mock_run:
+        AutoBlocker(_live_config(), in_memory_db).maybe_check_expired(now=1_000_000.0)
+    mock_run.assert_not_called()
+    assert in_memory_db.get_blocked_ips() == []
+    (entry,) = in_memory_db.get_block_history()
+    assert (entry.outcome, entry.dry_run, entry.created_by) == ("expired", True, "alice")
+
+
+def test_malformed_stored_rule_identifier_is_left_tracked(in_memory_db: Database) -> None:
+    in_memory_db.add_blocked_ip(_expired_block(rule_identifier="something else entirely"))
+    with patch("src.auto_block.platform.system", return_value="Windows"), \
+         patch("src.auto_block.subprocess.run") as mock_run:
+        AutoBlocker(_live_config(), in_memory_db).maybe_check_expired(now=1_000_000.0)
+    mock_run.assert_not_called()
+    assert len(in_memory_db.get_blocked_ips()) == 1
