@@ -17,6 +17,10 @@ Two hard safety rules apply regardless of config, checked before anything
 else: a whitelisted IP is never blocked, and neither is a private/local one
 (loopback, RFC1918, link-local) even if an event somehow names one as its
 source.
+
+The firewall commands themselves (build_block_command, build_unblock_command,
+run_firewall_command) are module-level so manual blocking
+(src/block_management.py) goes through exactly the same code path.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import platform
+import re
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
@@ -40,7 +45,76 @@ logger = logging.getLogger("netsentry.auto_block")
 # than once a minute
 _EXPIRY_CHECK_INTERVAL = 60.0
 
-_RULE_PREFIX = "NetSentry_Block_"
+RULE_PREFIX = "NetSentry_Block_"
+_RULE_PREFIX = RULE_PREFIX
+# what a stored rule identifier must look like before it's put in a command
+_RULE_IDENTIFIER = re.compile(re.escape(RULE_PREFIX) + r"[0-9A-Fa-f.:]+(/[0-9]{1,3})?")
+
+
+def normalize_target(target: str) -> str:
+    """target (an IP address or CIDR range) as ipaddress prints it -- the
+    only form ever put into a firewall command. Raises ValueError for
+    anything that isn't a valid address or range, so raw input can never
+    reach a command line."""
+    network = ipaddress.ip_network(str(target).strip(), strict=False)
+    if network.prefixlen == network.max_prefixlen:
+        return str(network.network_address)
+    return str(network)
+
+
+def rule_identifier_for(target: str) -> str:
+    """The firewall rule name for a block on target, e.g.
+    "NetSentry_Block_45.33.1.1" -- stored with the block so the same rule
+    can be removed again later."""
+    return RULE_PREFIX + normalize_target(target)
+
+
+def build_block_command(target: str) -> Optional[List[str]]:
+    """The command (an argument list, never a shell string) that blocks
+    inbound traffic from target on this OS, or None on an unsupported OS.
+    Raises ValueError if target isn't a valid address or range."""
+    target = normalize_target(target)
+    system = platform.system()
+    if system == "Windows":
+        return [
+            "netsh", "advfirewall", "firewall", "add", "rule",
+            f"name={RULE_PREFIX}{target}", "dir=in", "action=block", f"remoteip={target}",
+        ]
+    if system == "Linux":
+        return ["iptables", "-A", "INPUT", "-s", target, "-j", "DROP"]
+    return None
+
+
+def build_unblock_command(target: str, rule_identifier: Optional[str] = None) -> Optional[List[str]]:
+    """The command that removes the block on target, or None on an
+    unsupported OS. On Windows the rule is deleted by the stored
+    rule_identifier (its name); iptables rules have no names, so on Linux
+    it's the same match as the block command. Raises ValueError if target
+    or the stored rule_identifier don't look like what NetSentry writes."""
+    target = normalize_target(target)
+    rule = rule_identifier or rule_identifier_for(target)
+    if not _RULE_IDENTIFIER.fullmatch(rule):
+        raise ValueError(f"unexpected firewall rule identifier {rule!r}")
+    system = platform.system()
+    if system == "Windows":
+        return ["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule}"]
+    if system == "Linux":
+        return ["iptables", "-D", "INPUT", "-s", target, "-j", "DROP"]
+    return None
+
+
+def run_firewall_command(command: List[str]) -> Optional[str]:
+    """Runs a firewall command (as an argument list, no shell). Returns None
+    on success, or a short description of what went wrong. Never raises --
+    a missing binary, insufficient privileges, or any other subprocess
+    failure is logged as a warning and handed back to the caller."""
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True, timeout=10)
+    except Exception as exc:  # noqa: BLE001 - a bad/missing firewall tool must not take down the engine
+        logger.warning("Firewall command failed (%s): %s", " ".join(command), exc)
+        detail = getattr(exc, "stderr", None) or getattr(exc, "stdout", None)
+        return f"{exc} -- {str(detail).strip()}" if detail and str(detail).strip() else str(exc)
+    return None
 
 
 def _parse_whitelist(entries: List[str]) -> List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
@@ -167,7 +241,7 @@ class AutoBlocker:
         blocked = BlockedIP(
             source_ip=ip,
             event_type=event.event_type,
-            rule_identifier=_RULE_PREFIX + ip,
+            rule_identifier=rule_identifier_for(ip),
             expires_at=expires_at,
         )
         self.database.add_blocked_ip(blocked)
@@ -181,7 +255,11 @@ class AutoBlocker:
             self._remove_block(blocked)
 
     def _remove_block(self, blocked: BlockedIP) -> None:
-        command = self._build_unblock_command(blocked.source_ip)
+        try:
+            command = build_unblock_command(blocked.source_ip, blocked.rule_identifier)
+        except ValueError as exc:
+            logger.warning("Cannot remove the firewall rule for %s, leaving it tracked: %s", blocked.source_ip, exc)
+            return
         if command is None:
             logger.warning(
                 "Unsupported OS %s; cannot remove firewall rule for %s, leaving it tracked",
@@ -207,34 +285,10 @@ class AutoBlocker:
 
     @staticmethod
     def _run_command(command: List[str]) -> bool:
-        """Runs a firewall command, returns True on success. Never raises --
-        a missing binary, insufficient privileges, or any other subprocess
-        failure is logged as a warning and swallowed so it can never take
-        down the detection engine."""
-        try:
-            subprocess.run(command, check=True, capture_output=True, text=True, timeout=10)
-        except Exception as exc:  # noqa: BLE001 - a bad/missing firewall tool must not take down the engine
-            logger.warning("Firewall command failed (%s): %s", " ".join(command), exc)
-            return False
-        return True
+        """Runs a firewall command, returns True on success (see
+        run_firewall_command)."""
+        return run_firewall_command(command) is None
 
     @staticmethod
     def _build_block_command(ip: str) -> Optional[List[str]]:
-        system = platform.system()
-        if system == "Windows":
-            return [
-                "netsh", "advfirewall", "firewall", "add", "rule",
-                f"name={_RULE_PREFIX}{ip}", "dir=in", "action=block", f"remoteip={ip}",
-            ]
-        if system == "Linux":
-            return ["iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"]
-        return None
-
-    @staticmethod
-    def _build_unblock_command(ip: str) -> Optional[List[str]]:
-        system = platform.system()
-        if system == "Windows":
-            return ["netsh", "advfirewall", "firewall", "delete", "rule", f"name={_RULE_PREFIX}{ip}"]
-        if system == "Linux":
-            return ["iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"]
-        return None
+        return build_block_command(ip)
