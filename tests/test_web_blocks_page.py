@@ -106,3 +106,5 @@ def test_page_is_gone_when_block_management_is_disabled(in_memory_db: Database) 
 
     client = create_app(in_memory_db, block_manager=BlockManager(config, in_memory_db)).test_client()
     assert client.get("/blocks").status_code == 404
+    # ...and the dashboard doesn't link to it
+    assert 'href="/blocks"' not in client.get("/").get_data(as_text=True)

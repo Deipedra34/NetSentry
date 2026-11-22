@@ -270,7 +270,7 @@
 
   <div class="charts-header" style="margin: 2rem 0 0.75rem;">
     <h2>Blocked IPs</h2>
-    <a class="nav-button" href="/blocks">Manage blocked IPs</a>
+    {% if block_management %}<a class="nav-button" href="/blocks">Manage blocked IPs</a>{% endif %}
   </div>
   <table>
     <thead>

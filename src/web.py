@@ -696,6 +696,7 @@ def create_app(
         return render_template(
             "dashboard.html",
             refresh_interval=refresh_interval,
+            block_management=block_manager.settings.enabled,
         )
 
     @app.route("/api/events")
