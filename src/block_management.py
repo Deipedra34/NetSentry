@@ -22,7 +22,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, FrozenSet, Iterable, List, Optional, Sequence, Tuple, Union
 
-from src.auto_block import build_block_command, rule_identifier_for, run_firewall_command
+from src.auto_block import (
+    build_block_command,
+    build_unblock_command,
+    rule_identifier_for,
+    run_firewall_command,
+)
 from src.config import Config
 from src.database import AuditEntry, BlockedIP, Database
 
@@ -469,3 +474,71 @@ class BlockManager:
             details += f"; reason: {reason}"
         self._audit(actor, "block", text, "dry_run" if existing.dry_run else "success", details)
         return BlockResult(existing, f"{text} was already blocked; its entry now lasts {how_long.removeprefix('for ')}.", applied=apply_now)
+
+    def find_active(self, target: str) -> Optional[BlockedIP]:
+        """The active block on target (an IP or CIDR range, in any notation
+        ipaddress accepts), or None. Raises BlockRefused if target isn't a
+        valid address or range."""
+        return self.database.get_active_block(target_text(parse_target(target)))
+
+    def unblock(self, block_id: int, actor: str = ACTOR_LOCAL) -> BlockResult:
+        """Lifts an active block -- manual or automatic -- removing its
+        firewall rule through the stored rule identifier, and moves it to
+        the block history. If the firewall command fails the block stays
+        recorded and BlockFailed is raised; a dry-run entry (never applied)
+        is just removed. Raises BlockRefused if there's no such block."""
+        blocked = self.database.get_blocked_ip(block_id)
+        if blocked is None:
+            raise self._refuse(
+                actor, "unblock", f"#{block_id}",
+                BlockRefused("not_found", "That block no longer exists (it may have expired or been removed)."),
+            )
+        target = blocked.source_ip
+        if blocked.dry_run:
+            self.database.move_block_to_history(blocked, "unblocked", printable(actor, 64), self._now())
+            self._audit(actor, "unblock", target, "success", "removed a dry-run entry (it was never applied at the firewall)")
+            return BlockResult(blocked, f"Removed {target} (it was a dry-run entry, never applied).", applied=False)
+
+        try:
+            command = build_unblock_command(target, blocked.rule_identifier)
+        except ValueError as exc:
+            raise self._fail(actor, "unblock", target, f"Can't build the unblock command: {exc}")
+        if command is None:
+            raise self._fail(actor, "unblock", target, "Firewall unblocking isn't supported on this operating system.")
+        logger.info("Firewall unblock command for %s [%s]: %s", target, actor, " ".join(command))
+        if self.dry_run:
+            logger.info(
+                "auto_block.dry_run is enabled -- NOT removing firewall block for %s (would have run: %s)",
+                target, " ".join(command),
+            )
+            self.database.move_block_to_history(blocked, "unblocked", printable(actor, 64), self._now())
+            self._audit(
+                actor, "unblock", target, "dry_run",
+                f"removed from the list; the firewall rule was not touched (dry run); would have run: {' '.join(command)}",
+            )
+            return BlockResult(
+                blocked,
+                f"Dry run: {target} removed from the list, but its firewall rule was not touched.",
+                applied=False,
+            )
+
+        error = run_firewall_command(command)
+        if error:
+            raise self._fail(
+                actor, "unblock", target,
+                f"The firewall command failed, so {target} is still blocked and stays listed: {error}",
+            )
+        self.database.move_block_to_history(blocked, "unblocked", printable(actor, 64), self._now())
+        self._audit(actor, "unblock", target, "success", f"removed the {blocked.source} block")
+        return BlockResult(blocked, f"Unblocked {target}.", applied=True)
+
+    def unblock_many(self, block_ids: Sequence[int], actor: str = ACTOR_LOCAL) -> List[Tuple[int, bool, str]]:
+        """Unblocks each of block_ids on its own (each is audited
+        separately); returns (id, succeeded, message) for every one."""
+        results: List[Tuple[int, bool, str]] = []
+        for block_id in block_ids:
+            try:
+                results.append((block_id, True, self.unblock(block_id, actor).message))
+            except (BlockRefused, BlockFailed) as exc:
+                results.append((block_id, False, str(exc)))
+        return results
