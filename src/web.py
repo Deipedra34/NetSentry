@@ -512,6 +512,7 @@ def _init_block_management(
             default_duration=settings.default_duration_minutes,
             max_duration=settings.max_duration_minutes,
             allow_permanent=settings.allow_permanent,
+            dry_run=manager.dry_run,
         )
 
     @app.route("/api/blocks/history")
