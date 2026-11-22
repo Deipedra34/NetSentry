@@ -16,8 +16,10 @@ from __future__ import annotations
 import ipaddress
 import re
 import unicodedata
-from typing import Union
+from dataclasses import dataclass, field
+from typing import FrozenSet, Iterable, List, Optional, Sequence, Tuple, Union
 
+IPAddress = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
 IPNetwork = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
 
 # the widest ranges a manual block may cover
@@ -105,3 +107,120 @@ def clean_reason(value: str) -> str:
             "reason_too_long", f"The reason may be at most {MAX_REASON_LENGTH} characters."
         )
     return reason
+
+
+# address classes that are never blocked, whatever the config says: (rule,
+# what it is, ranges). A target is refused if it overlaps any of them, so
+# a range can't sneak one in either.
+NEVER_BLOCK_RANGES: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
+    ("unspecified", "the unspecified address", ("0.0.0.0/8", "::/128")),
+    ("loopback", "a loopback address", ("127.0.0.0/8", "::1/128")),
+    ("link-local", "a link-local address", ("169.254.0.0/16", "fe80::/10")),
+    ("multicast", "a multicast address", ("224.0.0.0/4", "ff00::/8")),
+    ("broadcast", "the broadcast address", ("255.255.255.255/32",)),
+    (
+        "private",
+        "a private network address (RFC 1918, unique local or shared address space)",
+        ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"),
+    ),
+    ("ipv4_mapped", "an IPv4-mapped IPv6 address (block the IPv4 address itself)", ("::ffff:0:0/96",)),
+)
+_NEVER_BLOCK_NETWORKS: Tuple[Tuple[str, str, Tuple[IPNetwork, ...]], ...] = tuple(
+    (rule, description, tuple(ipaddress.ip_network(r) for r in ranges))
+    for rule, description, ranges in NEVER_BLOCK_RANGES
+)
+
+
+def _parse_addresses(values: Iterable[str]) -> FrozenSet[IPAddress]:
+    """The valid IP addresses among values (zone IDs dropped)."""
+    parsed = set()
+    for value in values:
+        try:
+            parsed.add(ipaddress.ip_address(str(value).split("%")[0]))
+        except ValueError:
+            continue
+    return frozenset(parsed)
+
+
+@dataclass(frozen=True)
+class ProtectedAddresses:
+    """This machine's own addresses and its default gateway(s) -- never
+    blockable. Built with from_strings() from src/sniffer.py's
+    local_network_addresses(), or by hand in tests."""
+
+    own: FrozenSet[IPAddress] = field(default_factory=frozenset)
+    gateways: FrozenSet[IPAddress] = field(default_factory=frozenset)
+
+    @classmethod
+    def from_strings(cls, own: Iterable[str], gateways: Iterable[str]) -> "ProtectedAddresses":
+        return cls(_parse_addresses(own), _parse_addresses(gateways))
+
+
+def _unmapped(address: IPAddress) -> IPAddress:
+    """An IPv4-mapped IPv6 address (::ffff:45.33.1.1, how a dual-stack
+    server sees IPv4 clients) as the IPv4 address it is."""
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped
+    return address
+
+
+def _contains(network: IPNetwork, address: IPAddress) -> bool:
+    address = _unmapped(address)
+    return address.version == network.version and address in network
+
+
+def check_blockable(
+    network: IPNetwork,
+    whitelist: Sequence[IPNetwork] = (),
+    protected: ProtectedAddresses = ProtectedAddresses(),
+    requester_ip: Optional[str] = None,
+) -> None:
+    """Raises BlockRefused (naming the rule) unless `network` may be
+    blocked. These rules are hard-coded, not configurable:
+
+      - never a special address class (NEVER_BLOCK_RANGES), nor anything
+        else that isn't a public address (reserved, documentation ranges...)
+      - never anything overlapping a whitelist entry
+      - never this machine's own addresses or its default gateway
+      - never the address of whoever is asking (an admin must not lock
+        themselves out of the dashboard)
+
+    A range is refused if it overlaps or contains any of those."""
+    target = target_text(network)
+    for rule, description, ranges in _NEVER_BLOCK_NETWORKS:
+        if any(r.version == network.version and network.overlaps(r) for r in ranges):
+            raise BlockRefused(rule, f"{target} is or contains {description}, which is never blocked.")
+    if not (network.network_address.is_global and network.broadcast_address.is_global):
+        raise BlockRefused(
+            "non_public",
+            f"{target} is or contains a reserved or otherwise non-public address, which is never blocked.",
+        )
+    for entry in whitelist:
+        if entry.version == network.version and network.overlaps(entry):
+            raise BlockRefused("whitelist", f"{target} overlaps the whitelist entry {entry}.")
+    for address in protected.own:
+        if _contains(network, address):
+            raise BlockRefused("own_address", f"{target} contains {address}, an address of this machine.")
+    for address in protected.gateways:
+        if _contains(network, address):
+            raise BlockRefused("gateway", f"{target} contains {address}, this machine's default gateway.")
+    if requester_ip:
+        requester = _parse_addresses([requester_ip])
+        if any(_contains(network, address) for address in requester):
+            raise BlockRefused(
+                "requester",
+                f"{target} contains your own address ({requester_ip}); blocking it would lock you out.",
+            )
+
+
+def parse_whitelist(entries: Iterable[str]) -> List[IPNetwork]:
+    """The global whitelist as networks; malformed entries are skipped
+    (config loading doesn't validate them, and a typo there must not stop
+    the safety check from running)."""
+    networks: List[IPNetwork] = []
+    for entry in entries:
+        try:
+            networks.append(ipaddress.ip_network(str(entry).strip(), strict=False))
+        except ValueError:
+            continue
+    return networks
