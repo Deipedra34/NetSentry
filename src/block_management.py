@@ -277,6 +277,17 @@ def describe_duration(minutes: int) -> str:
     return f"for {minutes} minute{'s' if minutes != 1 else ''}"
 
 
+def describe_expiry(minutes: int) -> str:
+    """'is now permanent' or 'now expires in 2 hours'."""
+    if minutes == 0:
+        return "is now permanent"
+    return f"now expires in {describe_duration(minutes).removeprefix('for ')}"
+
+
+def _format_expiry(moment: Optional[datetime]) -> str:
+    return moment.strftime("%Y-%m-%d %H:%M UTC") if moment else "never"
+
+
 def _local_protected_addresses() -> ProtectedAddresses:
     from src.sniffer import local_network_addresses  # the only module that imports scapy
 
@@ -408,7 +419,7 @@ class BlockManager:
         expires_at = self._expires_at(minutes)
         how_long = describe_duration(minutes)
         if existing is not None:
-            return self._reblock(existing, expires_at, how_long, clean, actor)
+            return self._reblock(existing, expires_at, minutes, clean, actor)
 
         command = build_block_command(text)
         if command is None:
@@ -447,7 +458,7 @@ class BlockManager:
         return BlockResult(blocked, message, applied=not self.dry_run)
 
     def _reblock(
-        self, existing: BlockedIP, expires_at: Optional[datetime], how_long: str, reason: str, actor: str
+        self, existing: BlockedIP, expires_at: Optional[datetime], minutes: int, reason: str, actor: str
     ) -> BlockResult:
         """Updates an active block instead of adding a duplicate rule. A
         dry-run entry gets its rule applied now if live mode is on."""
@@ -467,13 +478,13 @@ class BlockManager:
         existing.created_by = printable(actor, 64)
         existing.dry_run = existing.dry_run and not apply_now
         self.database.update_blocked_ip(existing)
-        details = f"already blocked; updated the existing entry to last {how_long.removeprefix('for ')}"
+        details = f"already blocked; updated the existing entry, which {describe_expiry(minutes)}"
         if apply_now:
             details += "; applied the dry-run entry at the firewall"
         if reason:
             details += f"; reason: {reason}"
         self._audit(actor, "block", text, "dry_run" if existing.dry_run else "success", details)
-        return BlockResult(existing, f"{text} was already blocked; its entry now lasts {how_long.removeprefix('for ')}.", applied=apply_now)
+        return BlockResult(existing, f"{text} was already blocked; it {describe_expiry(minutes)}.", applied=apply_now)
 
     def find_active(self, target: str) -> Optional[BlockedIP]:
         """The active block on target (an IP or CIDR range, in any notation
@@ -542,3 +553,35 @@ class BlockManager:
             except (BlockRefused, BlockFailed) as exc:
                 results.append((block_id, False, str(exc)))
         return results
+
+    def change_duration(self, block_id: int, duration_minutes: int, actor: str = ACTOR_LOCAL) -> BlockResult:
+        """Extends or shortens an active block (manual or automatic). The new
+        expiry is counted from now, not from when the block started:
+        duration_minutes=60 means "lift it an hour from now", however long
+        it has already been in place; 0 makes it permanent (if
+        allow_permanent). The same limits as a new block apply. Only
+        NetSentry's own expiry changes -- the firewall rule stays as it is
+        until the expiry check lifts it. Raises BlockRefused if there's no
+        such block or the duration isn't allowed."""
+        blocked = self.database.get_blocked_ip(block_id)
+        if blocked is None:
+            raise self._refuse(
+                actor, "change_duration", f"#{block_id}",
+                BlockRefused("not_found", "That block no longer exists (it may have expired or been removed)."),
+            )
+        try:
+            if duration_minutes is None:
+                raise BlockRefused("invalid_duration", "Give the new duration in minutes (0 = permanent).")
+            minutes = self.duration_minutes(duration_minutes)
+        except BlockRefused as exc:
+            raise self._refuse(actor, "change_duration", blocked.source_ip, exc)
+
+        previous = blocked.expires_at
+        blocked.expires_at = self._expires_at(minutes)
+        self.database.update_blocked_ip(blocked)
+        self._audit(
+            actor, "change_duration", blocked.source_ip, "success",
+            f"expiry changed from {_format_expiry(previous)} to {_format_expiry(blocked.expires_at)} "
+            f"({describe_duration(minutes)} from now)",
+        )
+        return BlockResult(blocked, f"{blocked.source_ip} {describe_expiry(minutes)}.", applied=False)
