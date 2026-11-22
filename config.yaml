@@ -433,6 +433,32 @@ auth:
 #   idle_timeout_minutes: 30
 #   cookie_secure: "true"
 
+# Manual blocking from the dashboard's Blocked IPs page (/blocks) and the
+# CLI (--block, --unblock): block or unblock IPs and CIDR ranges by hand,
+# change how long a block lasts, and review the block history and an audit
+# log of every action. Uses the same firewall commands and the same
+# auto_block.dry_run switch as automatic blocking. Blocking needs the admin
+# role; with auth disabled, the dashboard only allows it when it listens on
+# localhost. Some addresses can never be blocked (private ranges, this
+# machine, the gateway, whitelisted IPs, ...). See README.md "Managing
+# Blocked IPs".
+block_management:
+  enabled: true
+  default_duration_minutes: 60 # for manual blocks; 0 = permanent
+  max_duration_minutes: 10080 # longest non-permanent manual block (7 days)
+  allow_permanent: true # allow manual blocks that never expire
+  max_manual_blocks: 500 # active manual blocks at most, to keep the firewall rule table small
+  audit_keep_days: 365 # audit log and block history entries older than this are pruned at startup
+
+# Example for a stricter setup: short blocks only, nothing permanent:
+# block_management:
+#   enabled: true
+#   default_duration_minutes: 30
+#   max_duration_minutes: 1440
+#   allow_permanent: false
+#   max_manual_blocks: 100
+#   audit_keep_days: 730
+
 database:
   path: netsentry.db
 
