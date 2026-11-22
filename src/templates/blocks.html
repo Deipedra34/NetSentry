@@ -54,6 +54,9 @@
   .remaining { display: block; color: var(--muted); font-size: 0.78rem; }
   .remaining.expired { color: var(--warn); }
   .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.85rem; }
+  td.mono, td.nowrap { white-space: nowrap; overflow-wrap: normal; }
+  /* the form's labels are flex boxes, which would otherwise win over [hidden] */
+  [hidden] { display: none !important; }
   .block-form { margin-bottom: 1.25rem; }
   .block-form form { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: flex-end; }
   .block-form label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.8rem; color: var(--muted); }
@@ -563,10 +566,10 @@ function fillFilter(id, values, allLabel) {
 function auditRow(e) {
   const row = el("tr");
   row.appendChild(el("td", formatTime(e.timestamp)));
-  row.appendChild(el("td", e.actor));
-  row.appendChild(el("td", e.action));
+  row.appendChild(el("td", e.actor, "nowrap"));
+  row.appendChild(el("td", e.action, "nowrap"));
   row.appendChild(el("td", e.target, "mono"));
-  row.appendChild(el("td", e.result.replace("_", " "), "result-" + e.result));
+  row.appendChild(el("td", e.result.replace("_", " "), "nowrap result-" + e.result));
   row.appendChild(el("td", e.details || "—"));
   return row;
 }
