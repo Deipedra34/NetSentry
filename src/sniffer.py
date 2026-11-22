@@ -8,9 +8,10 @@ don't need scapy actually working / root privileges just to run.
 from __future__ import annotations
 
 import logging
+import socket
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from src import tls_parser
 from src.packet_info import PacketInfo
@@ -160,6 +161,37 @@ def list_interfaces() -> List[str]:
             "'pip install -r requirements.txt'."
         ) from exc
     return list(get_if_list())
+
+
+def local_network_addresses() -> Tuple[Set[str], Set[str]]:
+    """(this machine's own interface addresses, its default gateway(s)), as
+    IP strings -- what manual blocking must never block. Read from scapy's
+    routing tables (IPv4 and IPv6), plus whatever the hostname resolves to;
+    either source failing just leaves its part out, and both sets come
+    back empty if nothing can be determined. Never raises, and never sends
+    a packet."""
+    addresses: Set[str] = set()
+    gateways: Set[str] = set()
+    try:
+        from scapy.all import conf
+
+        for network, mask, gateway, _iface, address, _metric in conf.route.routes:
+            addresses.add(address)
+            if network == 0 and mask == 0 and gateway not in ("0.0.0.0", ""):
+                gateways.add(gateway)
+        for _network, prefix, gateway, _iface, candidates, _metric in conf.route6.routes:
+            addresses.update(candidates)
+            if prefix == 0 and gateway not in ("::", ""):
+                gateways.add(gateway)
+    except Exception:  # noqa: BLE001 - scapy missing or no routing info: fall back below
+        logger.debug("Could not read scapy's routing tables", exc_info=True)
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None):
+            addresses.add(str(info[4][0]).split("%")[0])
+    except OSError:
+        logger.debug("Could not resolve this machine's hostname", exc_info=True)
+    return {a for a in addresses if a}, {g for g in gateways if g}
 
 
 class NetworkSniffer:
