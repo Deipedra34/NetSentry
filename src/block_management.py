@@ -585,3 +585,15 @@ class BlockManager:
             f"({describe_duration(minutes)} from now)",
         )
         return BlockResult(blocked, f"{blocked.source_ip} {describe_expiry(minutes)}.", applied=False)
+
+    def unblock_target(self, target: str, actor: str = ACTOR_LOCAL) -> BlockResult:
+        """unblock() by address or range instead of id (the CLI's --unblock).
+        Raises BlockRefused -- and audits it -- if target isn't valid or
+        isn't currently blocked."""
+        try:
+            blocked = self.find_active(target)
+            if blocked is None:
+                raise BlockRefused("not_found", f"{printable(target, MAX_TARGET_LENGTH)} is not currently blocked.")
+        except BlockRefused as exc:
+            raise self._refuse(actor, "unblock", target, exc)
+        return self.unblock(blocked.id, actor)  # type: ignore[arg-type]

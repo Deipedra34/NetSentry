@@ -180,6 +180,24 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     user_commands.add_argument("--disable-user", metavar="USERNAME", help="Disable an account.")
     user_commands.add_argument("--enable-user", metavar="USERNAME", help="Re-enable an account.")
+    blocks_group = parser.add_argument_group(
+        "blocked IPs",
+        "Block and unblock IPs by hand and exit, with the same safety rules and audit log as "
+        "the dashboard (see README.md 'Managing Blocked IPs'). Never starts packet capture. "
+        "Follows auto_block.dry_run (or --auto-block-live / --auto-block-dry-run); with "
+        "dry run off, run it with the privileges the firewall commands need (root/Administrator).",
+    )
+    block_commands = blocks_group.add_mutually_exclusive_group()
+    block_commands.add_argument("--block", metavar="IP", help="Block an IP address or CIDR range.")
+    blocks_group.add_argument(
+        "--duration", type=int, metavar="MINUTES",
+        help="How long --block lasts, in minutes (0 = permanent; default: block_management.default_duration_minutes).",
+    )
+    blocks_group.add_argument("--reason", metavar="TEXT", help="Why --block was used (shown in the dashboard and audit log).")
+    block_commands.add_argument("--unblock", metavar="IP", help="Lift the block on an IP address or CIDR range.")
+    block_commands.add_argument("--list-blocks", action="store_true", help="List the active blocks.")
+    block_commands.add_argument("--audit-log", action="store_true", help="Show the block management audit log, newest first.")
+    blocks_group.add_argument("--limit", type=int, metavar="N", help="How many --audit-log entries to show (default 50).")
     return parser.parse_args(argv)
 
 
@@ -267,6 +285,70 @@ def run_user_command(args: argparse.Namespace, config: Config, database: Databas
     except auth.AccountError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    return 0
+
+
+def _wants_block_command(args: argparse.Namespace) -> bool:
+    return bool(
+        args.block or args.unblock or args.list_blocks or args.audit_log
+        or args.duration is not None or args.reason is not None or args.limit is not None
+    )
+
+
+def run_block_command(args: argparse.Namespace, config: Config, database: Database) -> int:
+    """Handles --block, --unblock, --list-blocks and --audit-log: the same
+    BlockManager, safety rules and audit log as the dashboard, with "cli"
+    as the actor. Prints the result and returns the exit code. Never
+    starts packet capture."""
+    from src.block_management import ACTOR_CLI, BlockFailed, BlockManager, BlockRefused
+
+    if (args.duration is not None or args.reason is not None) and not args.block:
+        print("Error: --duration and --reason only apply to --block.", file=sys.stderr)
+        return 1
+    if args.limit is not None and not args.audit_log:
+        print("Error: --limit only applies to --audit-log.", file=sys.stderr)
+        return 1
+    if not (args.block or args.unblock or args.list_blocks or args.audit_log):
+        return 1
+
+    manager = BlockManager(config, database)
+    try:
+        if args.block:
+            result = manager.block(args.block, args.duration, args.reason or "", actor=ACTOR_CLI)
+            print(result.message)
+        elif args.unblock:
+            print(manager.unblock_target(args.unblock, actor=ACTOR_CLI).message)
+        elif args.list_blocks:
+            blocks = database.get_blocked_ips()
+            if not blocks:
+                print("No IPs are currently blocked.")
+            for block in blocks:
+                expires = block.expires_at.strftime("%Y-%m-%d %H:%M UTC") if block.expires_at else "permanent"
+                flag = " (dry run, not applied)" if block.dry_run else ""
+                origin = block.created_by if block.source == "manual" else block.event_type
+                reason = f"  reason: {block.reason}" if block.reason else ""
+                print(f"{block.source_ip:<20} {block.source + flag:<30} expires: {expires:<20} by: {origin}{reason}")
+        else:
+            limit = args.limit if args.limit is not None else 50
+            if limit < 1:
+                print("Error: --limit must be at least 1.", file=sys.stderr)
+                return 1
+            entries = database.get_audit_entries(limit=limit)
+            if not entries:
+                print("The audit log is empty.")
+            for entry in entries:
+                when = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
+                print(f"{when}  {entry.actor:<12} {entry.action:<16} {entry.target:<20} {entry.result:<8} {entry.details}")
+    except BlockRefused as exc:
+        print(f"Refused ({exc.rule}): {exc}", file=sys.stderr)
+        return 1
+    except BlockFailed as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        if not manager.dry_run:
+            print("Live firewall changes need root (Linux) or an Administrator terminal (Windows).", file=sys.stderr)
+        return 1
+    if (args.block or args.unblock) and manager.dry_run:
+        print("Note: auto_block.dry_run is on, so the firewall was not touched (use --auto-block-live to apply).")
     return 0
 
 
@@ -470,6 +552,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if _wants_user_command(args) or args.role:
         try:
             return run_user_command(args, config, database)
+        finally:
+            database.close()
+
+    if _wants_block_command(args):
+        try:
+            return run_block_command(args, config, database)
         finally:
             database.close()
 
