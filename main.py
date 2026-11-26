@@ -40,7 +40,7 @@ import threading
 from datetime import date, datetime, timedelta
 from getpass import getpass
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from src.auto_block import AutoBlocker
 from src.config import Config, load_config
@@ -469,8 +469,17 @@ def dashboard_security_warnings(config: Config) -> List[str]:
     return []
 
 
-def run_web_dashboard(database: Database, config: Config, blocking: bool) -> Optional[threading.Thread]:
-    """Starts the Flask dashboard.
+def _siem_not_running(config: Config) -> Dict[str, Any]:
+    """The dashboard's SIEM status when nothing is forwarding (--web-only,
+    or siem.enabled off)."""
+    return {"enabled": bool(config.siem.enabled), "running": False, "destinations": []}
+
+
+def run_web_dashboard(
+    database: Database, config: Config, blocking: bool, siem: Optional[SiemForwarder] = None
+) -> Optional[threading.Thread]:
+    """Starts the Flask dashboard. siem, when capture is forwarding events,
+    feeds the dashboard's SIEM status.
 
     blocking=True runs it in the current thread and never comes back (until
     you Ctrl+C it). blocking=False spins it up on a daemon thread instead and
@@ -493,6 +502,7 @@ def run_web_dashboard(database: Database, config: Config, blocking: bool) -> Opt
         tls=config.web.https,
         block_manager=BlockManager(config, database),
         bind_host=config.web.host,
+        siem_status=siem.status if siem is not None else lambda: _siem_not_running(config),
     )
 
     ssl_context = None
@@ -650,7 +660,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     if args.web:
-        run_web_dashboard(database, config, blocking=False)
+        run_web_dashboard(database, config, blocking=False, siem=siem)
 
     interfaces = args.interface if args.interface else config.interfaces
     sniffer = NetworkSniffer(

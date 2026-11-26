@@ -619,6 +619,7 @@ def create_app(
     disable_auth: bool = False,
     block_manager: Optional[BlockManager] = None,
     bind_host: Optional[str] = None,
+    siem_status: Optional[Callable[[], Dict[str, Any]]] = None,
 ) -> Flask:
     """Builds the Flask app. refresh_interval just gets passed through to the
     template so the JS knows how often to poll. username/password enable
@@ -641,6 +642,10 @@ def create_app(
     with default, dry-run settings is made if none is given), and bind_host
     is the address the dashboard listens on (web.host) -- see README.md
     "Managing Blocked IPs" for why that matters when auth is off.
+
+    siem_status returns the SIEM forwarding status shown on the dashboard
+    (SiemForwarder.status in src/siem/dispatcher.py); without one, e.g.
+    with --web-only, forwarding is reported as not running.
     """
     app = Flask(__name__)
     app.config["NETSENTRY_DB"] = database
@@ -826,6 +831,21 @@ def create_app(
         newest first, with their source, creator, reason and dry-run flag."""
         blocked = database.get_blocked_ips()
         return jsonify([b.to_dict() for b in blocked])
+
+    @app.route("/api/siem/status")
+    @login_required
+    def api_siem_status() -> Any:
+        """Read-only SIEM forwarding status: per destination its state
+        (connected, retrying, disabled, ...), events sent and dropped, and
+        the last error and when it happened. Shows where events go (host
+        and port, or a file name) but never credentials or file paths."""
+        if siem_status is None:
+            return jsonify({"enabled": False, "running": False, "destinations": []})
+        try:
+            return jsonify(siem_status())
+        except Exception:  # noqa: BLE001 - a broken status must not take the dashboard down
+            app.logger.exception("Failed to read the SIEM forwarding status")
+            return jsonify({"error": "SIEM status unavailable, see the NetSentry log"}), 500
 
     # deliberately public, even with auth.enabled: it reveals nothing but
     # "the dashboard is up", and the Docker HEALTHCHECK (and other uptime
