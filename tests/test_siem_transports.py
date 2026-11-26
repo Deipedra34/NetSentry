@@ -298,6 +298,11 @@ def test_tls_reconnects_after_the_collector_drops_the_connection(pki: SiemPki) -
         collector.stop()
 
 
-def test_tls_context_rejects_a_missing_ca_file(tmp_path: Path) -> None:
-    with pytest.raises(OSError):
-        tls_context(ca_file=str(tmp_path / "missing.pem"))
+@pytest.mark.parametrize("setting", ["ca_file", "client_cert", "client_key"])
+def test_tls_context_names_a_missing_file(tmp_path: Path, pki: SiemPki, setting: str) -> None:
+    files = {"ca_file": str(pki.ca_file), "client_cert": str(pki.client_cert), "client_key": str(pki.client_key)}
+    files[setting] = str(tmp_path / "missing.pem")
+    with pytest.raises(FileNotFoundError) as raised:
+        tls_context(**files)
+    assert raised.value.filename == files[setting]
+    assert describe_error(raised.value) == f"{setting} not found"

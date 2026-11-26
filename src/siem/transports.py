@@ -10,6 +10,8 @@ sender thread for long.
 
 from __future__ import annotations
 
+import errno
+import os
 import socket
 import ssl
 import threading
@@ -248,6 +250,10 @@ def tls_context(
     collector's certificate and hostname verified against ca_file (or the
     system's trusted CAs), and an optional client certificate for mutual
     TLS. Raises OSError / ssl.SSLError if a file can't be loaded."""
+    # ssl's own errors don't say which file is missing
+    for setting, path in (("ca_file", ca_file), ("client_cert", client_cert), ("client_key", client_key)):
+        if path and not os.path.isfile(path):
+            raise FileNotFoundError(errno.ENOENT, f"{setting} not found", path)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     if verify:
