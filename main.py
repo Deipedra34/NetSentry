@@ -127,6 +127,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Print the NetSentry version and exit.",
     )
+    parser.add_argument(
+        "--siem-test",
+        action="store_true",
+        help=(
+            "Send one synthetic test event (type 'siem_test') to every SIEM destination in "
+            "config.yaml, print the result for each, and exit (no packet capture)."
+        ),
+    )
     report_group = parser.add_argument_group(
         "reports", "Write a PDF summary report from the database and exit (no packet capture)."
     )
@@ -399,6 +407,33 @@ def run_report(args: argparse.Namespace, config: Config, database: Database) -> 
     return 0
 
 
+def run_siem_test(config: Config) -> int:
+    """--siem-test: sends the synthetic siem_test event to every configured
+    destination in its own format and prints how each one went. 0 if every
+    destination took it, 1 otherwise."""
+    import copy
+
+    # enabled off: no sender threads are set up, send_test() connects directly
+    test_config = copy.deepcopy(config)
+    test_config.siem.enabled = False
+    forwarder = SiemForwarder(test_config, start=False)
+    results = forwarder.send_test()
+    if not results:
+        print("No SIEM destinations are configured (siem.destinations in config.yaml).")
+        return 1
+
+    print(f"Sending a synthetic 'siem_test' event (not a real detection) to {len(results)} destination(s):")
+    for result in results:
+        if result.format:
+            label = f"{result.name} ({result.format} over {result.transport} to {result.target})"
+        else:
+            label = result.name
+        print(f"  [{'OK' if result.delivered else 'FAILED'}] {label}: {result.outcome}")
+    if not config.siem.enabled:
+        print("Note: siem.enabled is false, so events are not forwarded during capture yet.")
+    return 0 if all(result.delivered for result in results) else 1
+
+
 def _is_loopback_host(host: str) -> bool:
     """True if binding the dashboard to host only exposes it to this
     machine (127.0.0.1, ::1, localhost) -- not 0.0.0.0, a LAN address etc.
@@ -528,6 +563,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         config.auto_block.dry_run = False
 
     setup_logging(level=config.logging.level, log_file=config.logging.file)
+
+    if args.siem_test:
+        return run_siem_test(config)
+
     logger.info("NetSentry starting up")
 
     if config.auto_block.enabled:

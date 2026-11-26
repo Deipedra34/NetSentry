@@ -16,7 +16,7 @@ import socket
 import time
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 from src.config import Config, SiemDestinationConfig, parse_siem_destinations
 from src.database import Event, ThreatIntelResult
@@ -252,13 +252,13 @@ class SiemForwarder:
             destinations.append(entry)
         return {"enabled": self.enabled, "running": True, "destinations": destinations}
 
-    def send_test(self) -> List[Tuple[str, bool, str]]:
+    def send_test(self) -> List["TestResult"]:
         """Sends the synthetic siem_test event to every configured
         destination -- whether or not siem.enabled is on -- straight away
-        (no queue, no thread), in that destination's format. Returns
-        (name, delivered, result) per destination, invalid ones included."""
+        (no queue, no thread), in that destination's format. Returns one
+        TestResult per destination, invalid ones included."""
         parsed, errors = parse_siem_destinations(self.config.siem.destinations)
-        results: List[Tuple[str, bool, str]] = [("(invalid)", False, error) for error in errors]
+        results = [TestResult("(invalid)", "", "", "", False, error) for error in errors]
         record = normalize_event(make_test_event(), sensor=self.hostname)
         for destination in parsed:
             transport: Optional[Transport] = None
@@ -268,13 +268,38 @@ class SiemForwarder:
                 transport.connect()
                 transport.send(payload)
             except Exception as exc:  # noqa: BLE001 - every failure is reported, not raised
-                results.append((destination.name, False, describe_error(exc)))
-                continue
+                outcome, delivered = describe_error(exc), False
+            else:
+                outcome, delivered = "sent", True
+                if destination.transport == "udp":
+                    outcome = "sent (UDP: delivery is not confirmed)"
+                if destination.transport == "tls" and not destination.verify:
+                    outcome += " (WARNING: certificate not verified)"
             finally:
                 if transport is not None:
                     transport.close()
-            note = "sent (UDP: delivery is not confirmed)" if destination.transport == "udp" else "sent"
-            if destination.transport == "tls" and not destination.verify:
-                note += " (WARNING: certificate not verified)"
-            results.append((destination.name, True, note))
+            results.append(
+                TestResult(
+                    destination.name,
+                    destination.format,
+                    destination.transport,
+                    _safe_target(destination, transport),
+                    delivered,
+                    outcome,
+                )
+            )
         return results
+
+
+@dataclass
+class TestResult:
+    """What --siem-test reports for one destination."""
+
+    __test__ = False  # not a pytest test class
+
+    name: str
+    format: str
+    transport: str
+    target: str
+    delivered: bool
+    outcome: str
