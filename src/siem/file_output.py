@@ -49,7 +49,8 @@ class _EventFileHandler(RotatingFileHandler):
         self.error: Optional[BaseException] = None
 
     def _open(self) -> Any:
-        stream = super()._open()
+        # newline="": every line ends in a bare LF, on Windows too
+        stream = open(self.baseFilename, self.mode, encoding=self.encoding, errors=self.errors, newline="")  # noqa: SIM115
         _restrict(self.baseFilename, 0o600)
         return stream
 
@@ -60,7 +61,7 @@ class _EventFileHandler(RotatingFileHandler):
         # no old files to keep: start the file over
         if self.stream:
             self.stream.close()
-        self.stream = open(self.baseFilename, "w", encoding="utf-8")  # noqa: SIM115
+        self.stream = open(self.baseFilename, "w", encoding="utf-8", newline="")  # noqa: SIM115
         _restrict(self.baseFilename, 0o600)
 
     def handleError(self, record: logging.LogRecord) -> None:
