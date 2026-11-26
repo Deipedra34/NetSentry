@@ -194,3 +194,11 @@ def test_summary_falls_back_to_the_mac_or_the_name() -> None:
         "DHCP starvation from de:ad:be:ef:00:01"
     )
     assert summary({"event_name": "SIEM test", "details": "hello"}) == "SIEM test: hello"
+
+
+def test_multibyte_details_are_shortened_not_dropped() -> None:
+    message = format_rfc5424(_record(details="\u00e9" * 4000), SETTINGS, max_bytes=2048)
+    assert len(message) <= 2048
+    _, params, text = parse(message)
+    assert dict(params)["truncated"] == "true"
+    assert "\u00e9\u00e9\u00e9" in text and text.endswith("[truncated]")

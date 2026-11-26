@@ -50,7 +50,10 @@ def fit_to_size(record: Dict[str, Any], render: Render, max_bytes: int) -> bytes
             overflow = len(data) - max_bytes
             if overflow <= 0:
                 return data
-            keep = len(trimmed["details"]) - overflow
+            # overflow is in bytes; a character can take several
+            current = trimmed["details"]
+            bytes_per_char = len(current.encode("utf-8")) / max(len(current), 1)
+            keep = len(current) - int(overflow / max(bytes_per_char, 1.0)) - 1
             if keep <= len(TRUNCATION_MARK):
                 del trimmed["details"]
                 break
