@@ -51,6 +51,7 @@ from src.logging_config import setup_logging
 from src.notifications import NotificationDispatcher
 from src.pcap_export import PcapExporter
 from src.reports.scheduler import ReportScheduler
+from src.siem.dispatcher import SiemForwarder
 from src.sniffer import NetworkSniffer, list_interfaces
 from src.threat_intel import ThreatIntelLookup
 
@@ -588,6 +589,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     threat_intel = ThreatIntelLookup(config, database, whitelist=config.whitelist)
     geoip = GeoIPLookup(config, database)
     report_scheduler = ReportScheduler(config, database)
+    # starts one sender thread per destination; closed (and flushed) below
+    siem = SiemForwarder(config, geoip=geoip) if config.siem.enabled else None
     if report_scheduler.enabled:
         logger.info(
             "Scheduled reports: %s, written to %s",
@@ -604,6 +607,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         threat_intel=threat_intel,
         geoip=geoip,
         report_scheduler=report_scheduler,
+        siem=siem,
     )
 
     if args.web:
@@ -636,6 +640,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             engine.packet_count,
             engine.event_count,
         )
+        if siem is not None:
+            siem.close()
         database.close()
 
     return 0
