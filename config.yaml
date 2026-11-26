@@ -427,6 +427,39 @@ siem:
   include_details: true # include the human-readable details text
   ecs_fields: false # JSON format only: use Elastic Common Schema field names
 
+# Example siem block with three destinations: a classic syslog collector
+# over UDP, Elastic over TLS with ECS field names, and a file for the Wazuh
+# agent to read. Each destination needs a name, a format (rfc5424 | cef |
+# json) and a transport (udp | tcp | tls | file); min_severity (low |
+# medium | high | critical) defaults to low, i.e. every event.
+# siem:
+#   enabled: true
+#   hostname: "sensor-office-1"
+#   facility: "local4"
+#   ecs_fields: true # ECS names for every json destination (Wazuh reads them too)
+#   destinations:
+#     - name: syslog
+#       format: rfc5424
+#       transport: udp
+#       host: "192.168.1.20"
+#       port: 514
+#     - name: elastic
+#       format: json
+#       transport: tls
+#       host: "logstash.example.com" # must match the collector's certificate
+#       port: 6514
+#       min_severity: medium
+#       ca_file: "certs/siem-ca.pem" # leave out to use the system's trusted CAs
+#       # client_cert: "certs/netsentry-client.pem" # for mutual TLS
+#       # client_key: "certs/netsentry-client-key.pem"
+#       # verify: false # NEVER in production: skips certificate checks
+#     - name: wazuh
+#       format: json
+#       transport: file
+#       path: "siem/netsentry-events.ndjson" # point the Wazuh agent's <localfile> here
+#       max_size_mb: 50
+#       backup_count: 5
+
 # Dashboard authentication: user accounts with a login page, sessions and an
 # admin/viewer role split. Disabled by default, so existing installs keep
 # working unchanged (with the legacy web.username/web.password Basic Auth,
