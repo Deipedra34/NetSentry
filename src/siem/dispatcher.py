@@ -166,7 +166,16 @@ class SiemForwarder:
             transport = self.transport_factory(destination)
         except (OSError, ValueError) as exc:
             reason = describe_error(exc)
-            logger.error("SIEM destination %r is disabled: %s", destination.name, reason)
+            if destination.transport == "tls":
+                reason = f"TLS files could not be loaded: {reason}"
+            # the log names the file; the dashboard (status()) doesn't
+            filename = getattr(exc, "filename", None)
+            logger.error(
+                "SIEM destination %r is disabled: %s%s",
+                destination.name,
+                reason,
+                f" ({filename})" if filename else "",
+            )
             return _Destination(destination, None, None, error=reason)
         if destination.transport == "tls" and not destination.verify:
             logger.warning(
