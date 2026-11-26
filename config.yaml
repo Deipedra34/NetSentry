@@ -410,6 +410,23 @@ reports:
   top_n_sources: 10 # rows in the top source IPs table
   keep_reports: 30 # delete the oldest scheduled reports beyond this many (0 = keep all)
 
+# SIEM and syslog forwarding: send every detected event to Splunk, Elastic,
+# Wazuh, Graylog or any syslog collector, as RFC 5424 syslog, CEF or JSON,
+# over UDP, TCP, TLS or a local file a log shipper tails. Disabled by
+# default. Each destination has its own background sender and in-memory
+# queue, so a slow or unreachable collector never slows down capture. Test
+# the destinations with: python main.py --siem-test
+# See README.md "SIEM and Syslog Forwarding".
+siem:
+  enabled: false
+  destinations: [] # see the examples below
+  hostname: "" # sent as the syslog HOSTNAME / sensor name; empty = this machine's hostname
+  app_name: "netsentry" # syslog APP-NAME
+  facility: "local0" # syslog facility: kern, user, daemon, auth, ..., local0-local7
+  queue_size: 10000 # events held per destination while it's unreachable; the oldest are dropped beyond this
+  include_details: true # include the human-readable details text
+  ecs_fields: false # JSON format only: use Elastic Common Schema field names
+
 # Dashboard authentication: user accounts with a login page, sessions and an
 # admin/viewer role split. Disabled by default, so existing installs keep
 # working unchanged (with the legacy web.username/web.password Basic Auth,
