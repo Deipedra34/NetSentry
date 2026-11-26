@@ -1506,6 +1506,405 @@ bind-mounted `./reports/` folder next to `docker-compose.yml` (see
 
 ---
 
+## SIEM and Syslog Forwarding
+
+NetSentry can forward every event it detects to a SIEM or log platform,
+such as Splunk, Elastic (ELK), Wazuh, Graylog, or any standard syslog
+collector (rsyslog, syslog-ng, ...), so its alerts sit next to the rest of
+your security data. Each event goes out as soon as it's saved to the
+database and enriched with GeoIP and threat intel, in one of three formats,
+over UDP, TCP, TLS, or into a local file a log shipper tails.
+
+This is **opt-in and disabled by default**. Forwarding never slows down or
+breaks packet capture. The engine only puts the event on an in-memory
+queue and moves on, and each destination has its own background sender,
+so a collector that's down or slow doesn't affect other destinations,
+notifications, PCAP export, or the dashboard.
+
+```yaml
+siem:
+  enabled: true
+  destinations:
+    - name: syslog
+      format: rfc5424        # rfc5424 | cef | json
+      transport: udp         # udp | tcp | tls | file
+      host: "192.168.1.20"
+      port: 514
+```
+
+Then check that every destination is reachable before you start capturing:
+
+```bash
+python main.py --siem-test
+```
+
+### Formats
+
+| Format | What it is | Use it for |
+|---|---|---|
+| `rfc5424` | Standard syslog ([RFC 5424](https://www.rfc-editor.org/rfc/rfc5424)) with the event's fields in a structured data element | Any syslog collector: rsyslog, syslog-ng, Graylog's Syslog inputs, Wazuh's remote syslog, Splunk syslog inputs |
+| `cef` | ArcSight Common Event Format | SIEMs with CEF parsers: ArcSight, QRadar, Splunk (with a CEF add-on), Microsoft Sentinel via a CEF/syslog agent, Elastic's CEF integration |
+| `json` | One JSON object per line (NDJSON), with a versioned schema; optionally with [Elastic Common Schema](https://www.elastic.co/guide/en/ecs/current/index.html) field names | Elastic (Filebeat, Logstash, Elastic Agent), Splunk's `_json`, Graylog's JSON extractor, Wazuh's JSON decoder, your own scripts |
+
+An RFC 5424 message looks like this (one line):
+
+```
+<133>1 2026-11-26T09:15:02.123Z sensor-1 netsentry 4242 BRUTE_FORCE [netsentry@32473 schema_version="1" timestamp="2026-11-26T09:15:02.123Z" event_type="BRUTE_FORCE" event_name="Brute force" event_id="57" severity="low" severity_score="25" sensor="sensor-1" source_ip="45.33.12.9" source_port="40112" source_mac="aa:bb:cc:dd:ee:01" destination_ip="10.0.0.5" destination_port="22" protocol="TCP" source_country="Germany" source_country_code="DE"] Brute force from 45.33.12.9: SSH: 14 connection attempts to 10.0.0.5:22 in 60s (threshold: 10)
+```
+
+The same event in CEF:
+
+```
+CEF:0|NetSentry|NetSentry|3.1.0|BRUTE_FORCE|Brute force|3|rt=1795684502123 dvchost=sensor-1 externalId=57 src=45.33.12.9 spt=40112 dst=10.0.0.5 dpt=22 smac=aa:bb:cc:dd:ee:01 proto=TCP cs1Label=severity cs1=low cs2Label=sourceCountry cs2=Germany flexNumber1Label=schemaVersion flexNumber1=1 msg=SSH: 14 connection attempts to 10.0.0.5:22 in 60s (threshold: 10)
+```
+
+And in JSON:
+
+```json
+{"schema_version":1,"timestamp":"2026-11-26T09:15:02.123Z","event_type":"BRUTE_FORCE","event_name":"Brute force","event_id":57,"severity":"low","severity_score":25,"sensor":"sensor-1","source_ip":"45.33.12.9","source_port":40112,"source_mac":"aa:bb:cc:dd:ee:01","destination_ip":"10.0.0.5","destination_port":22,"protocol":"TCP","details":"SSH: 14 connection attempts to 10.0.0.5:22 in 60s (threshold: 10)","source_country":"Germany","source_country_code":"DE","netsentry_version":"3.1.0"}
+```
+
+`32473` in the RFC 5424 structured data ID is the private enterprise
+number RFC 5424 reserves for examples and documentation; NetSentry doesn't
+have one of its own.
+
+### Transports
+
+| Transport | Delivery | Notes |
+|---|---|---|
+| `udp` | One datagram per event, fire and forget | The classic syslog transport ([RFC 5426](https://www.rfc-editor.org/rfc/rfc5426)). Lossy: nothing confirms an event arrived. Default port 514. |
+| `tcp` | A persistent connection | Default port 514. Framing is RFC 6587 octet counting (`<length> <message>`) for `rfc5424` and `cef`, and one object per line for `json`; set `framing: newline` or `framing: octet_counting` to override. |
+| `tls` | TCP inside TLS 1.2 or newer ([RFC 5425](https://www.rfc-editor.org/rfc/rfc5425)) | The collector's certificate and hostname are verified. Default port 6514. Same framing as `tcp`. |
+| `file` | Appended to a local file, one event per line | Rotated at `max_size_mb`, keeping `backup_count` old files. For Wazuh, Filebeat, the Splunk Universal Forwarder, or any agent that tails a file. |
+
+Not every TCP input speaks octet counting: rsyslog, syslog-ng, Graylog's
+Syslog TCP input and Filebeat's `syslog` input do, but **Splunk's raw TCP
+inputs and Logstash's `json_lines` codec expect one event per line**, so
+use `framing: newline` for those.
+
+One event is at most **8192 bytes** over UDP, TCP and TLS (64 KB in a
+file). A bigger one has its details text cut first and is marked
+`truncated` (`"truncated":true` in JSON, `truncated="true"` in RFC 5424,
+`cs6=truncated` in CEF).
+
+### Settings
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Turn forwarding on/off. |
+| `destinations` | `[]` | Where events go, see below. |
+| `hostname` | `""` | Sent as the syslog HOSTNAME and the sensor name in every format. Empty means this machine's hostname. |
+| `app_name` | `netsentry` | The syslog APP-NAME. |
+| `facility` | `local0` | The syslog facility: `kern`, `user`, `mail`, `daemon`, `auth`, `syslog`, `lpr`, `news`, `uucp`, `cron`, `authpriv`, `ftp`, `ntp`, `security`, `console`, `solaris-cron`, or `local0` to `local7`. |
+| `queue_size` | `10000` | Events held in memory per destination while it can't keep up. |
+| `include_details` | `true` | Include the human-readable details text. |
+| `ecs_fields` | `false` | Use Elastic Common Schema field names for every `json` destination. |
+
+Each destination takes:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `name` | *(required)* | A unique name, shown in the log and on the dashboard. |
+| `format` | *(required)* | `rfc5424`, `cef` or `json`. |
+| `transport` | *(required)* | `udp`, `tcp`, `tls` or `file`. |
+| `host` | *(required for network transports)* | The collector's hostname or IP address. |
+| `port` | `514` (`udp`/`tcp`), `6514` (`tls`) | The collector's port. |
+| `min_severity` | `low` | Only events at or above this level are sent: `low`, `medium`, `high` or `critical`. See the mapping below. |
+| `framing` | `auto` | `tcp`/`tls` only: `auto`, `octet_counting` or `newline`. |
+| `ca_file` | `""` | `tls` only: a CA bundle to verify the collector against. Empty uses the system's trusted CAs. |
+| `client_cert`, `client_key` | `""` | `tls` only: a client certificate and its key, for mutual TLS. The key can be in the certificate file. |
+| `verify` | `true` | `tls` only: verify the collector's certificate and hostname. See below before turning this off. |
+| `path` | *(required for `file`)* | The file to write. Its folder is created if it's missing. |
+| `max_size_mb` | `50` | `file` only: rotate the file at this size. |
+| `backup_count` | `5` | `file` only: rotated files to keep. `0` keeps none: the file starts over instead. |
+
+Every destination is checked at startup. One with an unknown format or
+transport, a port outside 1 to 65535, a missing required setting, or a
+misspelled key is logged as an error and **skipped**; the others still
+work. A TLS destination whose CA, certificate or key file can't be loaded
+is shown as disabled.
+
+### Severity mapping
+
+NetSentry's own levels are the ones `auto_block` and `threat_intel` already
+use for their `min_severity`. Each format maps them onto its own scale:
+
+| NetSentry | Event types | Syslog severity | CEF severity | `severity_score` / ECS `event.severity` |
+|---|---|---|---|---|
+| `low` | `PORT_SCAN`, `BRUTE_FORCE`, `ICMP_FLOOD`, `PING_SWEEP`, `ICMP_OVERSIZED`, and any type not listed here | 5 (notice) | 3 | 25 |
+| `medium` | `TRAFFIC_ANOMALY`, `ML_ANOMALY` | 4 (warning) | 5 | 50 |
+| `high` | `ARP_SPOOF`, `DHCP_STARVATION`, `ROGUE_DHCP_SERVER`, `DNS_TUNNEL`, `TLS_ANOMALY`, `BEACONING`, `DATA_EXFILTRATION` | 3 (error) | 8 | 75 |
+| `critical` | `SYN_FLOOD` | 2 (critical) | 10 | 100 |
+
+The syslog PRI is `facility * 8 + severity`, so a `SYN_FLOOD` on `local0`
+is `<130>`.
+
+### Queue, drops and reconnects
+
+- Each destination has its own queue of up to `queue_size` events. When
+  it's full, the **oldest** queued event is dropped to make room: during an
+  outage, the most recent events are usually the ones you want. Drops are
+  counted (on the dashboard) and logged at most once a minute, never once
+  per event.
+- A destination that can't be reached is retried **forever**, with
+  exponential backoff: 1s, 2s, 4s, and so on, up to 60s between attempts.
+  Events wait in the queue meanwhile, in order. The log only records state
+  changes (connected, connection lost, connection restored), not every
+  retry.
+- A TCP or TLS connection the collector closed (say, because it
+  restarted) is noticed before the next send and reopened, instead of the
+  event being written into a dead connection.
+- An event that fails to send five times on a working connection is given
+  up on and counted as failed, so one bad event can't block the queue.
+- Every network step has a timeout, hostname resolution included (5s
+  each), so a collector that hangs can't block its sender for long.
+- On shutdown, NetSentry spends up to about two seconds sending what's
+  still queued, then stops. Anything still queued is counted as dropped
+  and logged.
+- Full event payloads are never logged above DEBUG, and nothing secret
+  (API keys, passwords) is ever part of an event.
+
+### TLS
+
+With `transport: tls`, NetSentry requires **TLS 1.2 or newer** and
+verifies the collector's certificate and that it matches `host`, against
+`ca_file` or the system's trusted CAs. Set `client_cert` and `client_key`
+for collectors that require mutual TLS.
+
+```yaml
+    - name: elastic
+      format: json
+      transport: tls
+      host: "logstash.example.com"   # must be a name on the collector's certificate
+      port: 6514
+      ca_file: "certs/siem-ca.pem"
+      client_cert: "certs/netsentry-client.pem"
+      client_key: "certs/netsentry-client-key.pem"
+```
+
+`verify: false` turns both checks off. The connection is still encrypted,
+but anyone between NetSentry and the collector can impersonate it and read
+every event. NetSentry logs a warning at every startup while it's off,
+and `--siem-test` flags it. Only use it to try out a lab collector with a
+throwaway certificate.
+
+### Testing destinations: `--siem-test`
+
+`python main.py --siem-test` sends **one synthetic test event** to every
+configured destination, in that destination's format, prints how it went,
+and exits without starting packet capture. It works before you turn
+`siem.enabled` on.
+
+```
+Sending a synthetic 'siem_test' event (not a real detection) to 3 destination(s):
+  [OK] syslog (rfc5424 over udp to 192.168.1.20:514): sent (UDP: delivery is not confirmed)
+  [FAILED] elastic (json over tls to logstash.example.com:6514): TLS certificate verification failed: Hostname mismatch, certificate is not valid for 'logstash.example.com'.
+  [OK] wazuh (json over file to netsentry-events.ndjson): sent
+```
+
+The test event's type is **`siem_test`**, its details say "NetSentry SIEM
+forwarding test event -- not a real detection", and it's flagged as a test
+in every format (`"test":true` in JSON, `test="true"` in RFC 5424,
+`cs6=test` in CEF, the `test` tag in ECS), so a SIEM rule can ignore it.
+The exit code is 0 only if every destination took the event. Over UDP,
+"sent" only means it left this machine: UDP can't confirm delivery, so
+check the collector.
+
+With Docker: `docker compose exec netsentry python main.py --siem-test`.
+
+### Dashboard status
+
+The dashboard's **SIEM Forwarding** panel shows, for each destination, its
+state (`connected`, `connecting`, `retrying`, `disabled`, or `stopped`),
+the events sent and dropped, and the last error and when it happened. It's
+read-only and fed by `GET /api/siem/status`, which needs a signed-in user
+when [dashboard authentication](#dashboard-authentication) is on, like
+every other API. It shows the collector's host and port, or only the file
+name for a file destination, never credentials or file paths. With
+`--web-only`, nothing is forwarding, so the panel says so.
+
+### Platform examples
+
+**Splunk.** Send CEF or RFC 5424 over UDP or TCP to a Splunk network
+input (or to a syslog server that Splunk reads from), or JSON over TCP.
+Splunk's raw TCP inputs split events on newlines, so use
+`framing: newline` there. NetSentry doesn't push to the HTTP Event
+Collector (HEC).
+
+```yaml
+    - name: splunk
+      format: json
+      transport: tcp
+      host: "splunk.example.com"
+      port: 5514
+      framing: newline
+```
+
+```ini
+# Splunk inputs.conf
+[tcp://5514]
+sourcetype = _json
+index = netsentry
+```
+
+**Elastic.** Either let Filebeat (or Elastic Agent) read a file
+destination, which survives Elastic being down for a while, or send to a
+Logstash TCP/TLS input. Turn on `ecs_fields` so the events land with ECS
+names.
+
+```yaml
+siem:
+  enabled: true
+  ecs_fields: true
+  destinations:
+    - name: filebeat
+      format: json
+      transport: file
+      path: "siem/netsentry-events.ndjson"
+```
+
+```yaml
+# filebeat.yml
+filebeat.inputs:
+  - type: filestream
+    id: netsentry
+    paths: ["/opt/netsentry/siem/netsentry-events.ndjson*"]
+    parsers:
+      - ndjson:
+          target: ""
+          overwrite_keys: true
+```
+
+```
+# Logstash, for a tls destination with framing: newline
+input { tcp { port => 6514 ssl_enabled => true ssl_certificate => "..." ssl_key => "..." codec => json_lines } }
+```
+
+**Wazuh.** Use a file destination and let the Wazuh agent read it; its
+JSON decoder picks up the fields.
+
+```yaml
+    - name: wazuh
+      format: json
+      transport: file
+      path: "siem/netsentry-events.ndjson"
+```
+
+```xml
+<!-- ossec.conf on the agent -->
+<localfile>
+  <log_format>json</log_format>
+  <location>/opt/netsentry/siem/netsentry-events.ndjson</location>
+</localfile>
+```
+
+**Graylog.** Point an RFC 5424 destination at a Syslog UDP or TCP input
+(TCP understands octet counting), or send JSON with `framing: newline` to a
+Raw/Plaintext TCP input and parse it with a JSON extractor or pipeline
+rule. NetSentry doesn't speak GELF itself.
+
+```yaml
+    - name: graylog
+      format: rfc5424
+      transport: tcp
+      host: "graylog.example.com"
+      port: 1514
+```
+
+### Field reference
+
+**JSON** (`ecs_fields: false`). Fields that don't apply to an event are
+left out, never sent as `null`.
+
+| Field | Meaning |
+|---|---|
+| `schema_version` | Revision of this schema, currently `1`. Bumped when a field is renamed or changes meaning; new fields don't bump it. |
+| `timestamp` | When the event was detected, RFC 3339 in UTC with milliseconds. |
+| `event_type`, `event_name` | E.g. `PORT_SCAN` and "Port scan". |
+| `event_id` | The event's ID in NetSentry's database. |
+| `severity`, `severity_score` | NetSentry's level and its 0-100 score (see the mapping). |
+| `sensor` | `siem.hostname`, or this machine's hostname. |
+| `source_ip`, `source_port`, `source_mac` | Who triggered the event. Ports, MAC and protocol come from the packet that triggered it. DHCP starvation has no source IP, only a MAC. |
+| `destination_ip`, `destination_port` | The other end, when there is one. |
+| `protocol`, `interface` | E.g. `TCP`, and the capture interface. |
+| `details` | The human-readable details, including any GeoIP and threat intel text. |
+| `source_country`, `source_country_code`, `source_city`, `source_asn`, `source_as_org` | GeoIP fields, with [GeoIP enrichment](#geoip-enrichment) on. Also `destination_*`. |
+| `source_abuse_score`, `source_abuse_reports`, `source_vt_malicious`, `source_vt_engines` | AbuseIPDB and VirusTotal results, with [threat intel](#threat-intelligence-lookups) on. Also `destination_*`. |
+| `truncated` | `true` if the event was shortened to fit the size limit. |
+| `test` | `true` only on the `--siem-test` event. |
+| `netsentry_version` | The NetSentry version that sent it. |
+
+**JSON with `ecs_fields: true`** uses `@timestamp`, `message` (a one-line
+summary with the details), `event.kind` (`alert`), `event.category`
+(`intrusion_detection`, `network`), `event.code` (the event type),
+`event.id`, `event.severity` (the score), `log.level` (NetSentry's level),
+`rule.name`, `source.ip`/`port`/`mac`, `source.geo.country_name`/
+`country_iso_code`/`city_name`, `source.as.number`/`organization.name`, the
+same under `destination.*`, `network.transport`, `observer.name`/
+`hostname`/`product`/`vendor`/`version`/`type` (`ids`),
+`observer.ingress.interface.name`, `ecs.version`, and `tags`. NetSentry's
+own extras are under `netsentry.*`: `schema_version`, `severity`,
+`threat_intel.source`/`destination`, `truncated`, and `test`.
+
+**CEF.** The header is `CEF:0|NetSentry|NetSentry|<version>|<event type>|<event name>|<severity 0-10>|`.
+The extension uses:
+
+| Key | Meaning |
+|---|---|
+| `rt` | Detection time, milliseconds since the epoch |
+| `dvchost` | The sensor name |
+| `externalId` | The event's database ID |
+| `src`, `spt`, `smac` | Source IPv4 address, port, MAC |
+| `dst`, `dpt` | Destination IPv4 address, port |
+| `c6a2`, `c6a3` | Source / destination IPv6 address (with their labels) |
+| `proto` | The protocol |
+| `deviceInboundInterface` | The capture interface |
+| `cs1` (`severity`) | NetSentry's level |
+| `cs2` / `cs3` (`sourceCountry` / `destinationCountry`) | GeoIP country |
+| `cs4` / `cs5` (`sourceNetwork` / `destinationNetwork`) | GeoIP network owner, e.g. `AS24940 Hetzner Online GmbH` |
+| `cs6` (`netsentryFlags`) | `test` and/or `truncated` |
+| `cn1` / `cn2` (`sourceAbuseScore` / `sourceVirusTotalMalicious`) | Threat intel for the source |
+| `cn3` (`destinationAbuseScore`) | Threat intel for the destination |
+| `flexNumber1` (`schemaVersion`) | The schema version |
+| `msg` | The details text (always last) |
+
+**RFC 5424.** PRI from `facility` and the severity, the timestamp in UTC,
+HOSTNAME from `hostname`, APP-NAME from `app_name`, PROCID is NetSentry's
+process ID, and MSGID is the event type. The structured data element
+`[netsentry@32473 ...]` carries the JSON fields above except `details`,
+which is the message text.
+
+**Log injection.** Events contain text attackers control: DNS query names,
+TLS certificate fields, hostnames. Every value is cleaned before it's sent:
+line breaks and other control characters are escaped (`\n`, `\x1b`, ...),
+each field has a length limit, and invalid UTF-8 is replaced. On top of
+that, `"`, `\` and `]` are escaped in RFC 5424 structured data, `|` and `\`
+in CEF headers, and `=`, `\` and line breaks in CEF extensions. A crafted
+DNS name can't add a syslog line, break out of the structured data, or add
+CEF keys.
+
+### What it does not do
+
+- **No HTTP push.** There's no Splunk HEC, Elasticsearch bulk API, or
+  other HTTP output. Use a network input or a file a shipper reads.
+- **No delivery guarantee.** UDP is lossy by design. The queue lives in
+  memory, so events still queued when NetSentry crashes or is killed are
+  lost (a normal shutdown sends what it can for a couple of seconds).
+  Events dropped because the queue was full are only counted. For the
+  strongest guarantee, use a file destination and a shipper with its own
+  persistent queue (Filebeat, Wazuh, the Splunk Universal Forwarder).
+- **No acknowledgements.** Over TCP and TLS, "sent" means the operating
+  system accepted the data, not that the collector processed it; syslog
+  has no application-level acknowledgements.
+- **No GELF, LEEF, or vendor-specific APIs.** The three formats above are
+  what's supported.
+- **Only new events.** Events already in the database aren't sent; there's
+  no backfill.
+- The `--web-only` dashboard doesn't forward anything; forwarding runs
+  alongside capture.
+
+---
+
 ## DNS Tunneling Detection
 
 DNS tunneling encodes arbitrary data into DNS queries (and the responses to
