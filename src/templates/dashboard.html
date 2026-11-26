@@ -195,6 +195,12 @@
   .chart-box { position: relative; height: 260px; margin-top: 0.75rem; }
   .empty { color: var(--muted); padding: 2rem; text-align: center; }
   .muted { color: var(--muted); }
+  .siem-summary { font-size: 0.85rem; color: var(--muted); }
+  .siem-state { font-weight: 600; }
+  .siem-state.connected { color: var(--accent); }
+  .siem-state.connecting { color: var(--info); }
+  .siem-state.retrying { color: var(--warn); }
+  .siem-state.disabled, .siem-state.stopped { color: var(--muted); }
   footer {
     text-align: center;
     color: var(--muted);
@@ -285,9 +291,27 @@
       <tr><td colspan="4" class="empty">No IPs currently blocked.</td></tr>
     </tbody>
   </table>
+
+  <div class="charts-header" style="margin: 2rem 0 0.75rem;">
+    <h2>SIEM Forwarding</h2>
+    <span class="siem-summary" id="siem-summary">&hellip;</span>
+  </div>
+  <table id="siem-table" hidden>
+    <thead>
+      <tr>
+        <th style="width: 10rem;">Destination</th>
+        <th style="width: 14rem;">Sends To</th>
+        <th style="width: 7rem;">State</th>
+        <th style="width: 6rem;">Sent</th>
+        <th style="width: 6rem;">Dropped</th>
+        <th>Last Error</th>
+      </tr>
+    </thead>
+    <tbody id="siem-body"></tbody>
+  </table>
 </main>
 <footer>
-  NetSentry auto-refreshes every <code>{{ refresh_interval }}</code>s &middot; API: <code>/api/events</code>, <code>/api/stats</code>, <code>/api/stats/timeline</code>, <code>/api/stats/distribution</code>, <code>/api/blocked_ips</code>
+  NetSentry auto-refreshes every <code>{{ refresh_interval }}</code>s &middot; API: <code>/api/events</code>, <code>/api/stats</code>, <code>/api/stats/timeline</code>, <code>/api/stats/distribution</code>, <code>/api/blocked_ips</code>, <code>/api/siem/status</code>
   <br>by Deipedra
 </footer>
 
@@ -534,9 +558,45 @@ document.getElementById("range-selector").addEventListener("click", (e) => {
   refreshCharts();
 });
 
+async function refreshSiem() {
+  try {
+    const res = await fetch("/api/siem/status");
+    checkSignedIn(res);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const status = await res.json();
+    const destinations = status.destinations || [];
+    const summary = document.getElementById("siem-summary");
+    const table = document.getElementById("siem-table");
+    if (!status.enabled) {
+      summary.textContent = "off (siem.enabled in config.yaml)";
+    } else if (!status.running) {
+      summary.textContent = "not running (only while capturing)";
+    } else {
+      const connected = destinations.filter(d => d.state === "connected").length;
+      summary.textContent = `${connected} of ${destinations.length} destination(s) connected`;
+    }
+    table.hidden = !destinations.length;
+    document.getElementById("siem-body").innerHTML = destinations.map(d => `
+      <tr>
+        <td>${escapeHtml(d.name)} <span class="muted">${escapeHtml(d.format)}/${escapeHtml(d.transport)}</span></td>
+        <td>${escapeHtml(d.target)}</td>
+        <td><span class="siem-state ${escapeHtml(d.state)}">${escapeHtml(d.state)}</span></td>
+        <td>${escapeHtml(String(d.sent ?? 0))}</td>
+        <td>${escapeHtml(String(d.dropped ?? 0))}</td>
+        <td>${d.last_error ? `${escapeHtml(d.last_error)}<br><span class="muted">${escapeHtml(d.last_error_at ?? "")}</span>` : '<span class="muted">none</span>'}</td>
+      </tr>
+    `).join("");
+  } catch (err) {
+    if (err.message === "signed out") return;
+    document.getElementById("siem-summary").textContent = "status unavailable";
+    console.error("NetSentry SIEM status refresh failed:", err);
+  }
+}
+
 function refreshDashboard() {
   refreshEvents();
   refreshCharts();
+  refreshSiem();
 }
 
 refreshDashboard();
