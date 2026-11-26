@@ -34,6 +34,7 @@ from src.notifications import NotificationDispatcher
 from src.packet_info import PacketInfo
 from src.pcap_export import PcapExporter
 from src.reports.scheduler import ReportScheduler
+from src.siem.dispatcher import SiemForwarder
 from src.threat_intel import ThreatIntelLookup
 
 logger = logging.getLogger("netsentry.engine")
@@ -235,6 +236,7 @@ class DetectionEngine:
         threat_intel: ThreatIntelLookup | None = None,
         geoip: GeoIPLookup | None = None,
         report_scheduler: ReportScheduler | None = None,
+        siem: SiemForwarder | None = None,
     ) -> None:
         # detectors should already be built/configured by build_detectors() before
         # they get here, this class doesn't do any of that itself
@@ -247,6 +249,7 @@ class DetectionEngine:
         self.threat_intel = threat_intel
         self.geoip = geoip
         self.report_scheduler = report_scheduler
+        self.siem = siem
         self._packet_count = 0
         self._event_count = 0
 
@@ -310,9 +313,10 @@ class DetectionEngine:
                         self.geoip.enrich(event)
                     except Exception:  # noqa: BLE001 - GeoIP failures must not affect capture
                         logger.exception("GeoIPLookup raised an exception")
+                intel = None
                 if self.threat_intel is not None:
                     try:
-                        self.threat_intel.enrich(event)
+                        intel = self.threat_intel.enrich(event)
                     except Exception:  # noqa: BLE001 - threat intel failures must not affect capture
                         logger.exception("ThreatIntelLookup raised an exception")
                 logger.warning(
@@ -321,6 +325,13 @@ class DetectionEngine:
                     event.source_ip,
                     event.details,
                 )
+                if self.siem is not None:
+                    # only queues the event; delivery runs on the
+                    # forwarder's own threads, never in the capture path
+                    try:
+                        self.siem.forward(event, packet=packet, threat=intel)
+                    except Exception:  # noqa: BLE001 - SIEM failures must not affect capture
+                        logger.exception("SiemForwarder raised an exception")
                 if self.notifier is not None:
                     try:
                         self.notifier.notify(event)
