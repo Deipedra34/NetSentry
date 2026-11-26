@@ -239,3 +239,58 @@ class TcpTransport(Transport):
         except OSError:
             self.close()
             raise
+
+
+def tls_context(
+    verify: bool = True, ca_file: str = "", client_cert: str = "", client_key: str = ""
+) -> ssl.SSLContext:
+    """The client context for a TLS destination: TLS 1.2 or newer, the
+    collector's certificate and hostname verified against ca_file (or the
+    system's trusted CAs), and an optional client certificate for mutual
+    TLS. Raises OSError / ssl.SSLError if a file can't be loaded."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    if verify:
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+        if ca_file:
+            context.load_verify_locations(cafile=ca_file)
+        else:
+            context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+    else:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    if client_cert:
+        context.load_cert_chain(certfile=client_cert, keyfile=client_key or None)
+    return context
+
+
+class TlsTransport(TcpTransport):
+    """Syslog over TLS (RFC 5425), with the same framing as TCP. The
+    handshake runs under the connect timeout; verification is on unless
+    the destination sets verify: false."""
+
+    kind = "tls"
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        context: ssl.SSLContext,
+        framing: str = "octet_counting",
+        timeout: float = SEND_TIMEOUT,
+        connect_timeout: float = CONNECT_TIMEOUT,
+        resolver: Resolver = socket.getaddrinfo,
+    ) -> None:
+        super().__init__(
+            host, port, framing=framing, timeout=timeout, connect_timeout=connect_timeout, resolver=resolver
+        )
+        self.context = context
+
+    def _wrap(self, sock: socket.socket) -> Any:
+        return self.context.wrap_socket(sock, server_hostname=self.host)
+
+    def _peek(self, sock: Any) -> bytes:
+        # SSL sockets can't peek; a collector never sends application data,
+        # so anything read here is safe to discard
+        return sock.recv(1)
