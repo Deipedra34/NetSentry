@@ -41,7 +41,9 @@ configurable and individually toggleable:
 
 Every detected event is persisted with a timestamp, source IP, event type,
 and a human-readable details string, and is immediately visible on the live
-dashboard.
+dashboard. It can also be forwarded to Splunk, Elastic, Wazuh, Graylog or any
+syslog collector as RFC 5424 syslog, CEF or JSON (see
+[SIEM and Syslog Forwarding](#siem-and-syslog-forwarding)).
 
 ---
 
@@ -163,6 +165,18 @@ netsentry/
 │   │   ├── pdf.py                # reportlab layout: tables + charts
 │   │   ├── generator.py          # Collect, render and write a report
 │   │   └── scheduler.py          # Scheduled daily/weekly reports + rotation
+│   ├── siem/                     # SIEM / syslog forwarding (see "SIEM and Syslog Forwarding")
+│   │   ├── normalize.py          # Event -> one stable, sanitized field set
+│   │   ├── sanitize.py           # Control characters, length limits, per-format escaping
+│   │   ├── severity.py           # NetSentry -> syslog / CEF / numeric severity
+│   │   ├── formatting.py         # Shared format settings + message size limit
+│   │   ├── rfc5424.py            # RFC 5424 syslog formatter
+│   │   ├── cef.py                # CEF formatter
+│   │   ├── json_format.py        # NDJSON formatter, with an ECS option
+│   │   ├── transports.py         # UDP, TCP (octet counting) and TLS transports
+│   │   ├── file_output.py        # Rotating file output for log shippers
+│   │   ├── sender.py             # Per-destination queue + background sender, backoff
+│   │   └── dispatcher.py         # SiemForwarder: engine hook, --siem-test, status
 │   ├── auth.py                   # Dashboard accounts: hashing, sessions, CSRF, roles
 │   ├── block_management.py       # Manual block/unblock, safety rules, audit log
 │   ├── web.py                    # Flask app, JSON API, login, self-signed TLS setup
@@ -227,7 +241,22 @@ netsentry/
     ├── test_web_blocks.py
     ├── test_web_blocks_page.py
     ├── test_block_cli.py
-    └── test_block_restart.py
+    ├── test_block_restart.py
+    ├── siem_helpers.py             # Local test collectors + throwaway certificates
+    ├── test_siem_config.py
+    ├── test_siem_sanitize.py
+    ├── test_siem_severity.py
+    ├── test_siem_normalize.py
+    ├── test_siem_rfc5424.py
+    ├── test_siem_cef.py
+    ├── test_siem_json.py
+    ├── test_siem_transports.py
+    ├── test_siem_sender.py
+    ├── test_siem_file_output.py
+    ├── test_siem_dispatcher.py
+    ├── test_siem_engine.py
+    ├── test_siem_cli.py
+    └── test_siem_web.py
 ```
 
 ---
@@ -587,6 +616,7 @@ python main.py --help
 --unblock IP            Lift the block on an IP or CIDR range
 --list-blocks           List the active blocks
 --audit-log             Show the block management audit log (with --limit N, default 50)
+--siem-test             Send a synthetic test event to every SIEM destination and exit (no capture)
 ```
 
 ### Dashboard preview
@@ -2671,6 +2701,10 @@ touching a network interface. `tests/test_ml_anomaly.py` fits tiny synthetic
 IsolationForest/RandomForestClassifier models inline (a handful of data
 points, no real training run) rather than depending on
 `scripts/train_ml_model.py` or a shipped model file.
+The SIEM forwarding tests (`tests/test_siem_*.py`) talk to collectors
+listening on 127.0.0.1 and to a throwaway CA generated for the run, with
+a fake clock instead of real backoff delays, so nothing leaves the
+machine.
 
 ---
 
