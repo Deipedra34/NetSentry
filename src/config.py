@@ -481,6 +481,68 @@ class ReportsConfig:
 
 
 @dataclass
+class SiemDestinationConfig:
+    """One SIEM / syslog destination -- an entry of siem.destinations,
+    checked by parse_siem_destinations() below. host/port are for the
+    network transports, ca_file..verify for tls only, path..backup_count
+    for file only."""
+
+    name: str
+    # "rfc5424", "cef" or "json"
+    format: str
+    # "udp", "tcp", "tls" or "file"
+    transport: str
+    host: str = ""
+    # 0 means the transport's usual port: 514 for udp/tcp, 6514 for tls
+    port: int = 0
+    # only events at or above this level are sent -- see EVENT_SEVERITY /
+    # SEVERITY_LEVELS in src/notifications.py
+    min_severity: str = "low"
+    # tls: a CA bundle to verify the collector against instead of the
+    # system's, and a client certificate + key for mutual TLS
+    ca_file: str = ""
+    client_cert: str = ""
+    client_key: str = ""
+    # tls: verify the collector's certificate and hostname -- only ever
+    # turn this off for testing
+    verify: bool = True
+    # file: where the events are written, rotated at max_size_mb with
+    # backup_count old files kept
+    path: str = ""
+    max_size_mb: float = 50
+    backup_count: int = 5
+    # tcp/tls: "auto" (octet counting for rfc5424/cef, one per line for
+    # json), "octet_counting" or "newline"
+    framing: str = "auto"
+
+
+@dataclass
+class SiemConfig:
+    """Forwarding every detected event to SIEMs and syslog collectors --
+    see src/siem/ and README.md "SIEM and Syslog Forwarding". Disabled by
+    default. destinations stays the list of mappings from config.yaml;
+    parse_siem_destinations() turns it into SiemDestinationConfig objects
+    at startup, skipping (and reporting) any invalid one."""
+
+    enabled: bool = False
+    destinations: List[Dict[str, Any]] = field(default_factory=list)
+    # syslog HOSTNAME and the sensor name in every format; empty means this
+    # machine's hostname
+    hostname: str = ""
+    # syslog APP-NAME
+    app_name: str = "netsentry"
+    # syslog facility name: kern, user, ..., local0-local7
+    facility: str = "local0"
+    # events held in memory per destination while it can't keep up; the
+    # oldest are dropped beyond this
+    queue_size: int = 10000
+    # include the human-readable details text in what's sent
+    include_details: bool = True
+    # JSON format only: Elastic Common Schema field names
+    ecs_fields: bool = False
+
+
+@dataclass
 class AuthConfig:
     """Dashboard user accounts, login sessions and roles -- see src/auth.py
     and README.md "Dashboard Authentication". Disabled by default so
@@ -578,6 +640,7 @@ class Config:
     threat_intel: ThreatIntelConfig = field(default_factory=ThreatIntelConfig)
     geoip: GeoIPConfig = field(default_factory=GeoIPConfig)
     reports: ReportsConfig = field(default_factory=ReportsConfig)
+    siem: SiemConfig = field(default_factory=SiemConfig)
 
 
 def _merge_dataclass(instance: Any, overrides: Dict[str, Any]) -> Any:
