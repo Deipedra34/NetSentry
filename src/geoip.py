@@ -153,6 +153,33 @@ class GeoIPLookup:
                 parts.append(text)
         return ", ".join(parts) or None
 
+    def locate(self, ip: str) -> Dict[str, Any]:
+        """The same lookup as describe(), as separate fields for SIEM
+        forwarding (see src/siem/normalize.py): country_name,
+        country_iso_code, city_name, as_number and as_organization, each
+        only when known. Empty for an IP that isn't looked up. Never
+        raises."""
+        if not self.enabled or not ip or not _is_lookup_candidate(ip):
+            return {}
+        found: Dict[str, Any] = {}
+        try:
+            if self._location_reader is not None:
+                record = self._location_reader.get(ip)
+                if isinstance(record, dict):
+                    country = record.get("country") or record.get("registered_country")
+                    found["country_name"] = _name(country)
+                    if isinstance(country, dict):
+                        found["country_iso_code"] = country.get("iso_code")
+                    found["city_name"] = _name(record.get("city"))
+            if self._network_reader is not None:
+                record = self._network_reader.get(ip)
+                if isinstance(record, dict):
+                    found["as_number"] = record.get("autonomous_system_number")
+                    found["as_organization"] = record.get("autonomous_system_organization")
+        except Exception:  # noqa: BLE001 - a bad lookup must not affect capture
+            logger.debug("GeoIP lookup for %s failed", ip, exc_info=True)
+        return {key: value for key, value in found.items() if value}
+
     def enrich(self, event: Event) -> Dict[str, str]:
         """Appends GeoIP context for event.source_ip and event.destination_ip
         to event.details (and to the stored event row, if it has an id).

@@ -250,3 +250,33 @@ def test_engine_survives_geoip_crash(in_memory_db: Database) -> None:
     engine = DetectionEngine(in_memory_db, [_AlwaysFires()], geoip=geoip)
     engine.handle_packet(make_packet(timestamp=1000.0, src_ip=PUBLIC_IP))
     assert [e.details for e in in_memory_db.get_events()] == ["probe"]
+
+
+def test_locate_returns_separate_fields(tmp_path: Path, in_memory_db: Database) -> None:
+    lookup = _lookup(tmp_path, in_memory_db, asn=True)
+    assert lookup.locate(PUBLIC_IP) == {
+        "country_name": "Germany",
+        "country_iso_code": "DE",
+        "city_name": "Frankfurt am Main",
+        "as_number": 24940,
+        "as_organization": "Hetzner Online GmbH",
+    }
+
+
+def test_locate_leaves_out_unknown_fields(tmp_path: Path, in_memory_db: Database) -> None:
+    lookup = _lookup(tmp_path, in_memory_db)
+    assert lookup.locate("45.33.50.1") == {"country_name": "Netherlands", "country_iso_code": "NL"}
+    assert lookup.locate("45.33.60.1") == {"country_name": "United States", "country_iso_code": "US"}
+    assert lookup.locate("45.33.99.99") == {}
+
+
+def test_locate_skips_private_ips_and_disabled_lookups(tmp_path: Path, in_memory_db: Database) -> None:
+    assert _lookup(tmp_path, in_memory_db).locate("192.168.1.10") == {}
+    assert _lookup(tmp_path, in_memory_db, enabled=False).locate(PUBLIC_IP) == {}
+
+
+def test_locate_never_raises(tmp_path: Path, in_memory_db: Database) -> None:
+    lookup = _lookup(tmp_path, in_memory_db)
+    assert lookup._location_reader is not None
+    lookup._location_reader.get.side_effect = ValueError("corrupt database")
+    assert lookup.locate(PUBLIC_IP) == {}
