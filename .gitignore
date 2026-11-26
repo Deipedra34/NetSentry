@@ -56,6 +56,9 @@ netsentry.log
 *.mmdb
 # generated PDF reports (anchored: src/reports/ is source code)
 /reports/
+# SIEM file output (anchored: src/siem/ is source code)
+/siem/
+*.ndjson
 
 # --- Environment / secrets ---
 .env

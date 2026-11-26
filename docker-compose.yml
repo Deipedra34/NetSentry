@@ -56,11 +56,26 @@ services:
     # User accounts (in the database) and the session signing key
     # (data/secret_key) both live in ./data below, so logins survive
     # container restarts and rebuilds. See README.md "Dashboard Authentication".
+    #
+    # SIEM forwarding (siem: in config.yaml): with host networking the
+    # container reaches collectors exactly as the host does -- use the
+    # collector's LAN address or hostname, or 127.0.0.1 for one running on
+    # this host. Test every destination with:
+    #   docker compose exec netsentry python main.py --siem-test
+    # A file destination needs a folder the container can write to. The
+    # simplest is the logs folder below (path: "logs/siem-events.ndjson"),
+    # or mount a folder of its own by uncommenting ./siem below and making it
+    # writable for the container user (uid 1000) first:
+    #   mkdir -p siem && sudo chown 1000:1000 siem
+    # then set path: "siem/netsentry-events.ndjson" and point Wazuh, Filebeat
+    # or the Splunk Universal Forwarder on the host at ./siem.
+    # See README.md "SIEM and Syslog Forwarding".
     volumes:
       - ./data:/app/data          # database (incl. dashboard users), session key, ML model, JA3 blocklist, GeoIP databases
       - ./captures:/app/captures  # PCAP exports
       - ./reports:/app/reports    # PDF reports (scheduled, and CLI on-demand)
       - ./logs:/app/logs          # log files
+      # - ./siem:/app/siem        # SIEM file output (see above)
       - ./config.yaml:/app/config.yaml:ro
 
     restart: unless-stopped

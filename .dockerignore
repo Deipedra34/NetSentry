@@ -20,6 +20,8 @@ tests/
 captures/
 logs/
 reports/
+siem/
+*.ndjson
 data/*.mmdb
 data/*.joblib
 
