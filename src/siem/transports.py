@@ -15,6 +15,7 @@ import os
 import socket
 import ssl
 import threading
+import time
 from typing import Any, Callable, List, Optional, Tuple
 
 from src.siem.formatting import DEFAULT_MAX_BYTES
@@ -22,6 +23,8 @@ from src.siem.formatting import DEFAULT_MAX_BYTES
 CONNECT_TIMEOUT = 5.0
 SEND_TIMEOUT = 5.0
 RESOLVE_TIMEOUT = 5.0
+# how long close() waits for the collector to close its side
+CLOSE_TIMEOUT = 1.0
 
 AddressInfo = Tuple[Any, ...]
 Resolver = Callable[..., List[AddressInfo]]
@@ -232,6 +235,35 @@ class TcpTransport(Transport):
     def _peek(self, sock: Any) -> bytes:
         return sock.recv(1, socket.MSG_PEEK)
 
+    def close(self) -> None:
+        """Closes the connection gracefully: says we're done, then waits
+        (at most CLOSE_TIMEOUT) for the collector to close its side.
+        Closing a socket outright while the collector still has something
+        unread on our side -- with TLS 1.3, the session tickets that follow
+        the handshake -- makes the OS send a reset instead, and the
+        collector may throw away the last message it got."""
+        sock, self._sock = self._sock, None
+        if sock is None:
+            return
+        try:
+            sock.settimeout(CLOSE_TIMEOUT)
+            sock = self._finish(sock)
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _finish(self, sock: Any) -> Any:
+        """Half-closes the connection and reads until the collector closes."""
+        sock.shutdown(socket.SHUT_WR)
+        deadline = time.monotonic() + CLOSE_TIMEOUT
+        while time.monotonic() < deadline and sock.recv(65536):
+            pass
+        return sock
+
     def send(self, payload: bytes) -> None:
         if self._sock is None or self._peer_closed():
             self.connect()
@@ -295,6 +327,11 @@ class TlsTransport(TcpTransport):
 
     def _wrap(self, sock: socket.socket) -> Any:
         return self.context.wrap_socket(sock, server_hostname=self.host)
+
+    def _finish(self, sock: Any) -> Any:
+        """Sends TLS close_notify and waits for the collector to answer or
+        close, reading (and discarding) whatever arrives meanwhile."""
+        return super()._finish(sock.unwrap())
 
     def _peek(self, sock: Any) -> bytes:
         # SSL sockets can't peek; a collector never sends application data,

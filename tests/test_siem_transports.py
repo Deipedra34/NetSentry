@@ -306,3 +306,24 @@ def test_tls_context_names_a_missing_file(tmp_path: Path, pki: SiemPki, setting:
         tls_context(**files)
     assert raised.value.filename == files[setting]
     assert describe_error(raised.value) == f"{setting} not found"
+
+
+@pytest.mark.parametrize("use_tls", [False, True])
+def test_send_then_close_never_loses_the_message(pki: SiemPki, use_tls: bool) -> None:
+    """Connecting, sending one message and closing straight away (what
+    --siem-test does) must deliver it every time -- with TLS 1.3 an abrupt
+    close turns into a reset that can lose it."""
+    for _ in range(20):
+        collector = Collector(context=pki.server_context() if use_tls else None)
+        try:
+            if use_tls:
+                transport: TcpTransport = TlsTransport("127.0.0.1", collector.port, tls_context(verify=False))
+            else:
+                transport = TcpTransport("127.0.0.1", collector.port)
+            transport.connect()
+            transport.send(b"only message")
+            transport.close()
+            assert collector.wait_for(lambda c: c.messages() == [b"only message"])
+            assert not collector.errors
+        finally:
+            collector.stop()
