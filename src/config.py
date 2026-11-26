@@ -12,7 +12,7 @@ import copy
 import os
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import yaml
 
@@ -688,6 +688,114 @@ def _apply_env_overrides(config: Config) -> None:
         value = os.environ.get(env_var)
         if value:
             setattr(getattr(config, section), key, value)
+
+
+SIEM_FORMATS = ("rfc5424", "cef", "json")
+SIEM_TRANSPORTS = ("udp", "tcp", "tls", "file")
+SIEM_FRAMINGS = ("auto", "octet_counting", "newline")
+# the port a network transport uses when a destination leaves it out
+SIEM_DEFAULT_PORTS = {"udp": 514, "tcp": 514, "tls": 6514}
+_SIEM_KEYS = {f.name for f in fields(SiemDestinationConfig)}
+
+
+def _parse_siem_destination(entry: Any, severity_levels: List[str]) -> SiemDestinationConfig:
+    """One siem.destinations entry as a SiemDestinationConfig. Raises
+    ValueError with a readable reason if anything about it is wrong."""
+    if not isinstance(entry, dict):
+        raise ValueError("must be a mapping of settings")
+    unknown = sorted(str(key) for key in entry if key not in _SIEM_KEYS)
+    if unknown:
+        raise ValueError(f"unknown setting(s) {unknown}")
+    missing = [key for key in ("name", "format", "transport") if not entry.get(key)]
+    if missing:
+        raise ValueError(f"missing required setting(s) {missing}")
+
+    destination = SiemDestinationConfig(**entry)
+    for key in ("name", "format", "transport", "host", "min_severity", "ca_file",
+                "client_cert", "client_key", "path", "framing"):
+        if not isinstance(getattr(destination, key), str):
+            raise ValueError(f"{key} must be a string")
+    destination.format = destination.format.lower()
+    destination.transport = destination.transport.lower()
+    destination.min_severity = destination.min_severity.lower()
+    destination.framing = destination.framing.lower()
+
+    if destination.format not in SIEM_FORMATS:
+        raise ValueError(f"format must be one of {list(SIEM_FORMATS)}, not {destination.format!r}")
+    if destination.transport not in SIEM_TRANSPORTS:
+        raise ValueError(
+            f"transport must be one of {list(SIEM_TRANSPORTS)}, not {destination.transport!r}"
+        )
+    if destination.min_severity not in severity_levels:
+        raise ValueError(
+            f"min_severity must be one of {severity_levels}, not {destination.min_severity!r}"
+        )
+    if destination.framing not in SIEM_FRAMINGS:
+        raise ValueError(f"framing must be one of {list(SIEM_FRAMINGS)}, not {destination.framing!r}")
+    if not isinstance(destination.verify, bool):
+        raise ValueError("verify must be true or false")
+
+    if destination.transport == "file":
+        if not destination.path:
+            raise ValueError("a file destination needs a path")
+        size = destination.max_size_mb
+        if isinstance(size, bool) or not isinstance(size, (int, float)) or size <= 0:
+            raise ValueError("max_size_mb must be a number above 0")
+        count = destination.backup_count
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("backup_count must be a whole number, 0 or more")
+        return destination
+
+    if not destination.host.strip():
+        raise ValueError(f"a {destination.transport} destination needs a host")
+    destination.host = destination.host.strip()
+    port = destination.port
+    if isinstance(port, bool) or not isinstance(port, int):
+        raise ValueError("port must be a whole number")
+    if port == 0:
+        destination.port = SIEM_DEFAULT_PORTS[destination.transport]
+    elif not 1 <= port <= 65535:
+        raise ValueError(f"port must be between 1 and 65535, not {port}")
+    if destination.transport != "tls" and (
+        destination.ca_file or destination.client_cert or destination.client_key
+    ):
+        raise ValueError("ca_file, client_cert and client_key only apply to the tls transport")
+    if destination.client_key and not destination.client_cert:
+        raise ValueError("client_key needs a client_cert")
+    return destination
+
+
+def parse_siem_destinations(entries: Any) -> Tuple[List[SiemDestinationConfig], List[str]]:
+    """Checks siem.destinations (the raw list from config.yaml) and returns
+    (the valid destinations, one error message per invalid one). An invalid
+    destination is only skipped, never fatal -- the caller logs the errors
+    at startup. Names must be unique; a later duplicate is skipped."""
+    # imported here: src/notifications.py imports this module
+    from src.notifications import SEVERITY_LEVELS
+
+    if entries is None:
+        return [], []
+    if not isinstance(entries, list):
+        return [], ["siem.destinations must be a list of destinations"]
+
+    destinations: List[SiemDestinationConfig] = []
+    errors: List[str] = []
+    names = set()
+    for index, entry in enumerate(entries, start=1):
+        label = f"siem destination #{index}"
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str) and entry["name"]:
+            label = f"siem destination {entry['name']!r}"
+        try:
+            destination = _parse_siem_destination(entry, SEVERITY_LEVELS)
+        except (TypeError, ValueError) as exc:
+            errors.append(f"{label} is invalid and skipped: {exc}")
+            continue
+        if destination.name in names:
+            errors.append(f"{label} is invalid and skipped: the name is already used")
+            continue
+        names.add(destination.name)
+        destinations.append(destination)
+    return destinations, errors
 
 
 def load_config(path: str | Path | None) -> Config:
