@@ -106,8 +106,11 @@ class Transport:
 
     @property
     def target(self) -> str:
-        """host:port, for status displays."""
-        host = f"[{self.host}]" if ":" in self.host else self.host
+        """host:port, for status displays -- without any user:password@
+        someone may have put in front of the host."""
+        host = self.host.rsplit("@", 1)[-1]
+        if ":" in host:
+            host = f"[{host}]"
         return f"{host}:{self.port}"
 
     def connect(self) -> None:

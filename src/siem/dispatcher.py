@@ -72,12 +72,10 @@ def _safe_target(destination: SiemDestinationConfig, transport: Optional[Transpo
     """Where a destination sends to, safe to show on the dashboard: host and
     port without any user:password@ prefix, or just the file name."""
     if transport is not None:
-        target = transport.target
-    elif destination.transport == "file":
-        target = destination.path.replace("\\", "/").rsplit("/", 1)[-1]
-    else:
-        target = f"{destination.host}:{destination.port}"
-    return target.rsplit("@", 1)[-1]
+        return transport.target
+    if destination.transport == "file":
+        return destination.path.replace("\\", "/").rsplit("/", 1)[-1]
+    return Transport(destination.host, destination.port).target
 
 
 @dataclass

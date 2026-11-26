@@ -327,3 +327,16 @@ def test_send_then_close_never_loses_the_message(pki: SiemPki, use_tls: bool) ->
             assert not collector.errors
         finally:
             collector.stop()
+
+
+@pytest.mark.parametrize(
+    ("host", "target"),
+    [
+        ("collector.test", "collector.test:514"),
+        ("2001:db8::1", "[2001:db8::1]:514"),
+        ("svc:hunter2@collector.test", "collector.test:514"),
+        ("svc:hunter2@2001:db8::1", "[2001:db8::1]:514"),
+    ],
+)
+def test_target_never_shows_credentials(host: str, target: str) -> None:
+    assert UdpTransport(host, 514).target == target
