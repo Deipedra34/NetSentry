@@ -151,3 +151,91 @@ class UdpTransport(Transport):
         except OSError:
             self.close()
             raise
+
+
+def frame(payload: bytes, framing: str) -> bytes:
+    """payload framed for a stream transport: RFC 6587 octet counting
+    ("<length> <message>") or one message per line ("newline")."""
+    if framing == "newline":
+        return payload + b"\n"
+    return str(len(payload)).encode("ascii") + b" " + payload
+
+
+class TcpTransport(Transport):
+    """Syslog over TCP (RFC 6587). framing is "octet_counting", the safe
+    choice for syslog since a message can never be split or merged, or
+    "newline" for inputs that read one JSON object per line. A dropped
+    connection is noticed before the next send and reopened."""
+
+    kind = "tcp"
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        framing: str = "octet_counting",
+        timeout: float = SEND_TIMEOUT,
+        connect_timeout: float = CONNECT_TIMEOUT,
+        resolver: Resolver = socket.getaddrinfo,
+    ) -> None:
+        super().__init__(host, port, timeout=timeout, resolver=resolver)
+        self.framing = framing
+        self.connect_timeout = connect_timeout
+
+    def _wrap(self, sock: socket.socket) -> Any:
+        """Hook for TLS; plain TCP uses the socket as it is."""
+        return sock
+
+    def connect(self) -> None:
+        self.close()
+        last_error: Optional[BaseException] = None
+        for family, socktype, proto, _, address in resolve(
+            self.host, self.port, socket.SOCK_STREAM, resolver=self.resolver
+        ):
+            sock = socket.socket(family, socktype, proto)
+            try:
+                sock.settimeout(self.connect_timeout)
+                sock.connect(address)
+                wrapped = self._wrap(sock)
+                wrapped.settimeout(self.timeout)
+            except OSError as exc:
+                sock.close()
+                last_error = exc
+                continue
+            self._sock = wrapped
+            return
+        raise last_error or OSError(f"no address to connect to for {self.host}")
+
+    def _peer_closed(self) -> bool:
+        """True if the collector has closed the connection (or reset it)
+        since the last send. A plain send() would often still succeed once
+        after that, silently losing the message."""
+        sock = self._sock
+        if sock is None:
+            return True
+        try:
+            sock.setblocking(False)
+            data = self._peek(sock)
+        except (BlockingIOError, ssl.SSLWantReadError, ssl.SSLWantWriteError):
+            return False  # nothing to read: still open
+        except OSError:
+            return True
+        finally:
+            try:
+                sock.settimeout(self.timeout)
+            except OSError:
+                pass
+        return data == b""
+
+    def _peek(self, sock: Any) -> bytes:
+        return sock.recv(1, socket.MSG_PEEK)
+
+    def send(self, payload: bytes) -> None:
+        if self._sock is None or self._peer_closed():
+            self.connect()
+        assert self._sock is not None
+        try:
+            self._sock.sendall(frame(payload[: self.max_bytes], self.framing))
+        except OSError:
+            self.close()
+            raise
