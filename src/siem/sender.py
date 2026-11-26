@@ -294,20 +294,32 @@ class DestinationSender:
         self.transport.close()
         self.state = STATE_STOPPED
 
-    def stop(self, flush_timeout: float = DEFAULT_FLUSH_TIMEOUT) -> None:
-        """Flushes what it can within about flush_timeout seconds, then
-        stops the thread. Never hangs: a collector that blocks the flush is
-        abandoned once the join times out (the thread is a daemon)."""
+    def request_stop(self, flush_timeout: float = DEFAULT_FLUSH_TIMEOUT) -> None:
+        """Tells the sender to flush what it can within about flush_timeout
+        seconds and stop, without waiting for it -- so several destinations
+        can flush at the same time. join() waits for it."""
         with self._changed:
             self._flush_timeout = flush_timeout
             self._stopping = True
             self._changed.notify_all()
-        if self._thread is not None:
-            self._thread.join(flush_timeout + 1.0)
-            if self._thread.is_alive():
-                logger.warning("SIEM destination %r: sender still busy at shutdown; abandoned", self.name)
-        else:
+        if self._thread is None:
             self._flush()
+
+    def join(self, timeout: float) -> None:
+        """Waits up to timeout seconds for a requested stop to finish. Never
+        hangs: a collector that blocks the flush is abandoned once the wait
+        times out (the thread is a daemon)."""
+        if self._thread is None:
+            return
+        self._thread.join(max(timeout, 0.0))
+        if self._thread.is_alive():
+            logger.warning("SIEM destination %r: sender still busy at shutdown; abandoned", self.name)
+
+    def stop(self, flush_timeout: float = DEFAULT_FLUSH_TIMEOUT) -> None:
+        """request_stop() and join(), with a second of slack for the last
+        send in progress."""
+        self.request_stop(flush_timeout)
+        self.join(flush_timeout + 1.0)
 
     # --- status -----------------------------------------------------------
 
